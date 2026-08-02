@@ -23,13 +23,17 @@ it is purely additive/opt-in: existing Measurement objects, the CLI, and
 CSV/JSONL output are unaffected whether or not this module is ever used.
 
 Note on duplication: ``pelvic_incidence_2d_from_label`` mirrors (rather than
-imports) ``metrics._pi_from_label_core``'s point-cloud extraction, because
-that private function returns only final angles/landmarks, not the raw
-endplate normal or L-R axis a 2D projection needs. If that extraction logic
-changes, this should be updated to match. ``lumbar_lordosis_2d_from_label``
-has no such gap -- it reuses ``metrics._lr_axis_from_label`` and
-``metrics._endplate_normal_from_label`` directly (the same cross-module reuse
-of metrics.py's private per-case helpers that ostk.cobb already does).
+imports) ``metrics._pi_from_label_core``'s extraction, because that private
+function returns only final angles/landmarks, not the raw endplate normal or
+L-R axis a 2D projection needs. It uses the same primitives metrics.py's
+current fix does -- ``spine.endplate_from_label`` (S1 endplate),
+``metrics.femoral_head_center`` (robust acetabular-interface sphere fit, not
+a raw point-cloud fit_sphere), and ``spine.endplate_overmask_midpoint_from_label``
+(PI/PT radius origin) -- if that extraction logic changes again, this should
+be updated to match. ``lumbar_lordosis_2d_from_label`` has no such gap -- it
+reuses ``metrics._lr_axis_from_label`` and ``metrics._endplate_normal_from_label``
+directly (the same cross-module reuse of metrics.py's private per-case
+helpers that ostk.cobb already does).
 """
 from __future__ import annotations
 
@@ -39,8 +43,8 @@ import numpy as np
 
 from .geometry import (WORLD_SUPERIOR, fit_plane_tls, fit_sphere, project_out,
                        project_to_plane_2d, unit)
-from .metrics import LL_ENDPLATE_CHAIN
-from .spine import anterior_axis
+from .metrics import LL_ENDPLATE_CHAIN, femoral_head_center
+from .spine import anterior_axis, endplate_from_label, endplate_overmask_midpoint_from_label
 
 
 def sagittal_axes(lr_axis, sup_axis=WORLD_SUPERIOR):
@@ -55,17 +59,16 @@ def sagittal_axes(lr_axis, sup_axis=WORLD_SUPERIOR):
 # Pelvic incidence landmarks
 # ---------------------------------------------------------------------------
 
-def pi_landmarks_2d(endplate_points, femhead_left_points, femhead_right_points,
-                    sup_axis=WORLD_SUPERIOR) -> Dict:
-    """Orthographic 2D sagittal-plane projection of the PI landmarks, from the
-    same three world-mm point clouds metrics.pelvic_incidence takes. Returns
-    2D (anterior, cranial) mm coordinates for the femoral heads, their
-    midpoint (the 2D origin), and the S1/sacrum endplate midpoint + normal --
-    everything metrics.pelvic_incidence's PI/SS/PT are computed from, just in
-    an explicit 2D basis instead of a 3D vector with the L-R component zeroed."""
-    m, n, ep_rms = fit_plane_tls(endplate_points)
-    cL, rL, eL = fit_sphere(femhead_left_points)
-    cR, rR, eR = fit_sphere(femhead_right_points)
+def _pi_landmarks_2d_from_fit(m, n, ep_rms, cL, rL, eL, cR, rR, eR,
+                              sup_axis=WORLD_SUPERIOR) -> Dict:
+    """Shared landmark-projection logic for an ALREADY-FITTED S1 endplate
+    (centroid m, cranially-oriented unit normal n, rms) and ALREADY-FITTED
+    femoral heads (centre/radius/rms each). Used by pi_landmarks_2d (which
+    fits both itself -- fit_plane_tls / fit_sphere -- for callers with their
+    own raw point clouds) and pelvic_incidence_2d_from_label (which uses the
+    more robust spine.endplate_from_label / metrics.femoral_head_center --
+    see the module docstring)."""
+    cL = np.asarray(cL, float); cR = np.asarray(cR, float)
     bicox = 0.5 * (cL + cR)
     lr = unit(cR - cL)
     ant, cranial = sagittal_axes(lr, sup_axis)
@@ -88,30 +91,45 @@ def pi_landmarks_2d(endplate_points, femhead_left_points, femhead_right_points,
     }
 
 
+def pi_landmarks_2d(endplate_points, femhead_left_points, femhead_right_points,
+                    sup_axis=WORLD_SUPERIOR) -> Dict:
+    """Orthographic 2D sagittal-plane projection of the PI landmarks, from the
+    same three world-mm point clouds metrics.pelvic_incidence takes. Returns
+    2D (anterior, cranial) mm coordinates for the femoral heads, their
+    midpoint (the 2D origin), and the S1/sacrum endplate midpoint + normal --
+    everything metrics.pelvic_incidence's PI/SS/PT are computed from, just in
+    an explicit 2D basis instead of a 3D vector with the L-R component zeroed."""
+    m, n, ep_rms = fit_plane_tls(endplate_points)
+    cL, rL, eL = fit_sphere(femhead_left_points)
+    cR, rR, eR = fit_sphere(femhead_right_points)
+    return _pi_landmarks_2d_from_fit(m, n, ep_rms, cL, rL, eL, cR, rR, eR, sup_axis)
+
+
 def pelvic_incidence_2d_from_label(label, affine, *, sup_axis=WORLD_SUPERIOR,
                                    endplate_frac: float = 0.15,
                                    head_frac: float = 0.35,
                                    min_voxels: int = 50) -> Optional[Dict]:
-    """Label-volume wrapper for pi_landmarks_2d. Extracts the same three
-    point clouds ostk.metrics._pi_from_label_core does (S1/sacrum endplate
-    slab, femoral head slabs) and mirrors its QC gate (returns None if any is
-    too small) -- see the module docstring for why this duplicates that
-    extraction rather than importing it."""
-    from .labels import lid
-    from .masks import (binary_mask, endplate_points, largest_component,
-                        mask_world, surface_slab)
-
-    s1 = binary_mask(label, lid("S1"))
-    src = s1 if s1.any() else binary_mask(label, lid("sacrum"))
-    ep = endplate_points(largest_component(src), affine, sup_axis, "superior",
-                         endplate_frac)
-    fl = mask_world(largest_component(binary_mask(label, lid("femur_left"))), affine)
-    fr = mask_world(largest_component(binary_mask(label, lid("femur_right"))), affine)
-    fhl = surface_slab(fl, sup_axis, "superior", head_frac)
-    fhr = surface_slab(fr, sup_axis, "superior", head_frac)
-    if min(len(ep), len(fhl), len(fhr)) < min_voxels:
+    """Label-volume wrapper for pi_landmarks_2d, mirroring
+    metrics._pi_from_label_core: S1's endplate via spine.endplate_from_label,
+    femoral heads via the robust acetabular-interface fit
+    (metrics.femoral_head_center), and the PI/PT radius origin corrected to
+    the endplate-over-mask midpoint (spine.endplate_overmask_midpoint_from_label).
+    `endplate_frac` is kept for signature compatibility but no longer used
+    (matching _pi_from_label_core). Returns None if a landmark is unavailable."""
+    ep_plane = endplate_from_label(label, affine, "S1", "superior",
+                                   normal_axis=sup_axis, min_points=min_voxels)
+    L = femoral_head_center(label, affine, "femur_left", "left_hip",
+                            sup_axis=sup_axis, slab_frac=head_frac, min_voxels=min_voxels)
+    R = femoral_head_center(label, affine, "femur_right", "right_hip",
+                            sup_axis=sup_axis, slab_frac=head_frac, min_voxels=min_voxels)
+    if ep_plane is None or L is None or R is None:
         return None
-    return pi_landmarks_2d(ep, fhl, fhr, sup_axis)
+    (cL, rL, eL), (cR, rR, eR) = L, R
+    m, n, ep_rms = ep_plane
+    om = endplate_overmask_midpoint_from_label(label, affine, "S1", sup_axis, "superior")
+    if om is not None:
+        m = om
+    return _pi_landmarks_2d_from_fit(m, n, ep_rms, cL, rL, eL, cR, rR, eR, sup_axis)
 
 
 # ---------------------------------------------------------------------------
