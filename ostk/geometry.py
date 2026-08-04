@@ -110,6 +110,21 @@ def signed_angle_in_plane(v1, v2, plane_normal, degrees: bool = True) -> float:
     return np.degrees(ang) if degrees else ang
 
 
+def project_to_plane_2d(points, origin, u_axis, v_axis) -> np.ndarray:
+    """Orthographic projection of world-mm points (or free vectors, using
+    origin=(0,0,0)) onto an explicit 2D basis (`u_axis`, `v_axis`) spanning a
+    plane. Returns the (u, v) coordinates -- shape (2,) for a single point/
+    vector or (N,2) for a point cloud. `u_axis`/`v_axis` are each independently
+    normalised; pass true orthonormal in-plane axes for the result to be a
+    faithful rigid 2D projection (e.g. a sagittal-plane anterior/cranial
+    basis -- see ostk.project2d.sagittal_axes)."""
+    P = np.asarray(points, dtype=np.float64)
+    o = np.asarray(origin, dtype=np.float64)
+    u, v = unit(u_axis), unit(v_axis)
+    rel = P - o
+    return np.stack([rel @ u, rel @ v], axis=-1)
+
+
 def cobb_angle(normal_a, normal_b, view_normal) -> float:
     """Cobb angle (deg) between two endplate PLANES as seen in the viewing plane
     (normal `view_normal`): project both endplate normals into that plane and take
