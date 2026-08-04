@@ -155,6 +155,82 @@ def endplate_corners(points, normal_axis=WORLD_SUPERIOR, which: str = "superior"
     return A, Pc, body
 
 
+def endplate_corners_anatomic(points, normal_axis=WORLD_SUPERIOR,
+                              which: str = "superior", lr=(1.0, 0.0, 0.0), *,
+                              rim_mm: float = 6.0, ant_pct: float = 99.0,
+                              lat_frac_rim: float = 0.30, **fit_kw):
+    """`endplate_corners`' line with its ANTERIOR end run out to the cortical margin.
+
+    `endplate_corners` is tuned to protect the ANGLE: `ant_skip=0.08` sets the anterior
+    corner 8% inside the margin so an osteophyte lip is bridged rather than chased. That
+    is right for a Cobb line and wrong for an annotation -- measured on case 0003 the
+    anterior corner lands 6-14 mm inside the true anterior cortex, a quarter to a third
+    of the body depth, which is plainly visible on a rendered overlay.
+
+    Only the anterior end is touched. `drop_post` was suspected too, but the A-P
+    occupancy of the medial band shows it already lands the posterior corner at the
+    spinal canal on every level, which is exactly where the posterior corner belongs:
+
+        L3  .##.#.##.##.##.#.##.##.##.##.#.##.##.#.....#.##.##.##.#.##...
+                                                 P            (canal = '.....')
+
+    Two earlier approaches failed and are worth not repeating. Both walked the fitted
+    line looking for where it left bone:
+      * on a DRR -- no gap exists, because the pedicles superimpose over the canal;
+      * in 3-D along the line -- the line is a CHORD across a concave endplate, by
+        design (it bridges the concavity the way a radiologist draws it), so it does
+        not lie on bone at all. L1's superior chord is over air for most of its length:
+            .#.##.#.##....#.............#####
+        Occupancy sampled along the chord is therefore meaningless, and reading it as
+        anatomy put L3's posterior corner past the canal and into the lamina.
+    The corner is an A-P EXTENT of the body, not a feature along the chord.
+
+    So: take medial-band points lying within `rim_mm` of the fitted plate (i.e. the
+    endplate rim, not the whole body -- the anterior cortex is concave in the sagittal
+    midline, so the anterior-most bone sits at the rims and the two faces must not be
+    conflated), take their `ant_pct` percentile along the anterior axis so a single
+    osteophyte spike cannot win, and slide the anterior corner ALONG THE EXISTING LINE
+    until it reaches that A-P coordinate.
+
+    Sliding along the line is what makes this safe: the corner stays collinear with the
+    fitted plate, so the line's DIRECTION -- hence SS, LL, PI and PT -- is unchanged.
+    Verified on 0003: worst direction change 1e-6 deg, anterior shortfall 6-14 mm -> ~0.
+
+    Returns (anterior_corner, posterior_corner, surface) or None -- same shape as
+    `endplate_corners`, so it is a drop-in.
+    """
+    P = np.asarray(points, dtype=np.float64)
+    res = endplate_corners(P, normal_axis, which, lr=lr, **fit_kw)
+    if res is None:
+        return None
+    A, Pc, surf = np.asarray(res[0], float), np.asarray(res[1], float), res[2]
+    u = Pc - A
+    span = float(np.linalg.norm(u))
+    if span <= 0:
+        return res
+    u = u / span                                     # anterior -> posterior
+    lrv = unit(lr)
+    ap = anterior_axis(unit(normal_axis), lr)
+    denom = float(u @ ap)
+    if abs(denom) < 1e-6:                            # line perpendicular to A-P: nothing to slide
+        return res
+    plate_n = unit(np.cross(u, lrv))                 # in-sagittal, perpendicular to the chord
+
+    if 0.0 < lat_frac_rim < 1.0:                     # medial band
+        lp = P @ lrv
+        lo, hi = np.quantile(lp, [(1 - lat_frac_rim) / 2, 1 - (1 - lat_frac_rim) / 2])
+        P = P[(lp >= lo) & (lp <= hi)]
+    rel = P - A
+    rim = P[np.abs(rel @ plate_n) <= rim_mm]         # points on the endplate RIM
+    if len(rim) < 6:
+        return res
+    target = float(np.percentile(rim @ ap, ant_pct))
+    t = (target - float(A @ ap)) / denom
+    if not np.isfinite(t) or t >= 0.0:               # never pull the corner posteriorly
+        return res
+    return (A + t * u), Pc, surf
+
+
 def corner_params_for_level(level: str) -> dict:
     """Body-isolation params. TIGHT isolation (exclude the lateral & posterior
     structure) for every level: on a vertebra it keeps the endplate line off the
