@@ -28,7 +28,7 @@ function returns only final angles/landmarks, not the raw endplate normal or
 L-R axis a 2D projection needs. It uses the same primitives metrics.py's
 current fix does -- ``spine.endplate_from_label`` (S1 endplate),
 ``metrics.femoral_head_center`` (robust acetabular-interface sphere fit, not
-a raw point-cloud fit_sphere), and ``spine.endplate_overmask_midpoint_from_label``
+a raw point-cloud fit_sphere), and the shared ``spine.pi_anchor_point``
 (PI/PT radius origin) -- if that extraction logic changes again, this should
 be updated to match. ``lumbar_lordosis_2d_from_label`` has no such gap -- it
 reuses ``metrics._lr_axis_from_label`` and ``metrics._endplate_normal_from_label``

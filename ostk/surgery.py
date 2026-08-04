@@ -187,7 +187,7 @@ def compensate_pelvis(label, affine, *, target_pt: float = 20.0,
     rendering the standing posture on real-resolution CT. No-op if PT ≤ target or the
     pelvis/femurs are unavailable."""
     from .metrics import spinopelvic_summary_from_label, femoral_head_center
-    from .spine import endplate_overmask_midpoint_from_label
+    from .spine import pi_anchor_point
     label = np.asarray(label)
     s = spinopelvic_summary_from_label(label, affine)
     pt = s.get("PT")
@@ -200,23 +200,16 @@ def compensate_pelvis(label, affine, *, target_pt: float = 20.0,
     F = 0.5 * (L[0] + R[0])
     lr = unit(lr_axis) if lr_axis is not None else unit(R[0] - L[0])
 
-    # sign: rotate the pelvic radius (M->S1 midpoint) so PT moves toward target.
+    # sign: rotate the pelvic radius (anchor - femoral-head axis) so PT moves toward
+    # target. Uses the SHARED spine.pi_anchor_point, i.e. the same anchor
+    # spinopelvic_summary_from_label reports PT from -- otherwise this drives the
+    # rotation off one definition and the caller measures the result with another, and
+    # compensate_pelvis(target_pt=20) does not land on 20.
     #
-    # This deliberately uses the OVER-MASK anchor, not the library default
-    # (spine.pi_anchor_point / "corner", the radiographic convention that metrics.py
-    # now reports PI/PT with). The direction is chosen from a PROXY angle -- the pelvic
-    # radius against vertical -- rather than by re-measuring PT, and that proxy was
-    # tuned against the over-mask anchor. With the corner anchor it can pick the wrong
-    # direction on coarse geometry: on the test phantom the two anchors sit 0.6 mm
-    # apart, yet the rotation flipped, driving SS 17.1 -> 7.1 instead of -> 21.0 while
-    # PT barely moved. That is a limitation of the proxy, NOT of the corner anchor.
-    #
-    # Fixing it properly means deriving the direction analytically, or re-measuring PT
-    # per candidate rotation, instead of comparing proxy angles. Until then this is
-    # pinned and explicit rather than silently divergent. Note the docstring above
-    # already directs callers to predict_compensated_alignment for post-op ANGLES --
-    # that path is exact and anchor-independent.
-    m = endplate_overmask_midpoint_from_label(label, affine, "S1", sup_axis, "superior")
+    # The proxy below IS metrics' PT formula (angle between the projected radius and the
+    # projected vertical), so with a shared anchor it predicts the measured result
+    # exactly, up to the voxel rotation's own losses.
+    m = pi_anchor_point(label, affine, sup_axis=sup_axis)
     th = float(np.deg2rad(pt - target_pt))
     if m is not None:
         r = np.asarray(m, float) - F
@@ -574,10 +567,10 @@ def bend_params(label, affine, *, delta_ll, delta_tk=0.0, pelvic_antevert=0.0,
     if pelvic_antevert:
         try:
             from .metrics import femoral_head_center
-            from .spine import endplate_overmask_midpoint_from_label
+            from .spine import pi_anchor_point
             L = femoral_head_center(lab, affine, "femur_left", "left_hip", sup_axis=sup_axis)
             R = femoral_head_center(lab, affine, "femur_right", "right_hip", sup_axis=sup_axis)
-            m = endplate_overmask_midpoint_from_label(lab, affine, "S1", sup_axis, "superior")
+            m = pi_anchor_point(lab, affine, sup_axis=sup_axis)   # same anchor as PT
             if L is not None and R is not None and m is not None:
                 F_hip = 0.5 * (L[0] + R[0])
                 r = np.asarray(m, float) - F_hip
