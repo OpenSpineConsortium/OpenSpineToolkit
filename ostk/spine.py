@@ -269,3 +269,55 @@ def endplate_from_label(label, affine, level: str, which: str = "superior",
     pts = mask_world(largest_component(m), affine)
     return fit_endplate(pts, normal_axis, which, method=method, ap_band=ap_band,
                         lr=lr, min_points=min_points, **corner_params_for_level(level))
+
+
+# ── the single source of truth for the PI/PT anchor ──────────────────────────────
+
+PI_ANCHOR_DEFAULT = "corner"
+
+
+def pi_anchor_point(label, affine, *, sup_axis=WORLD_SUPERIOR, mode=PI_ANCHOR_DEFAULT,
+                    level: str = "S1", which: str = "superior"):
+    """The point PI and PT are measured FROM on the S1 superior endplate.
+
+    ONE definition, used by every caller. It previously lived in three places --
+    metrics._pi_from_label_core and two sites in surgery (compensate_pelvis and the
+    pelvic-anteversion sign) -- which is how the anchor silently diverged: the surgery
+    helpers drove a rotation using one anchor while spinopelvic_summary_from_label
+    scored the result with another, so compensate_pelvis undershot its PT target.
+
+    mode="corner"    bisect the endplate between its anterior and posterior corners.
+        The operational method PI was DEFINED with on lateral radiographs
+        (Legaye/Duval-Beaupere), so it carries the convention the published PI norms
+        and Schwab targets were calibrated against -- and it is the only anchor
+        derivable from landmarks visible on a radiograph, which keeps CT- and
+        XR-derived PI on one definition.
+    mode="overmask"  centre of the endplate portion backed by vertebral body,
+        projected onto the rim. Retained as a primitive; no longer the default
+        anywhere. Interbody cage seating does NOT use it -- that path goes through
+        endplate_corners.
+
+    Both lie on the same rim line, so NEITHER changes SS or LL; only PI and PT move
+    (2.0 deg on case 0003, where they sit 7.4 mm apart along the rim).
+
+    Returns a world-mm point, or None if the endplate is unavailable.
+    """
+    from .masks import binary_mask, largest_component, mask_world
+    from .labels import LABELS
+    lid = LABELS.get(level)
+    if lid is None:
+        return None
+    if mode == "overmask":
+        return endplate_overmask_midpoint_from_label(label, affine, level, sup_axis, which)
+    if mode != "corner":
+        raise ValueError(f"pi anchor mode must be 'corner' or 'overmask', got {mode!r}")
+    try:
+        pts = mask_world(largest_component(binary_mask(np.asarray(label), lid)), affine)
+        kw = {k: v for k, v in corner_params_for_level(level).items()
+              if k in endplate_corners.__code__.co_varnames}
+        c = endplate_corners(pts, normal_axis=sup_axis, which=which, **kw)
+    except Exception:                                        # noqa: BLE001
+        return None
+    if c is None:
+        return None
+    return 0.5 * (np.asarray(c[0], float) + np.asarray(c[1], float))

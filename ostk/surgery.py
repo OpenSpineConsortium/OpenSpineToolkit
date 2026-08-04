@@ -200,7 +200,22 @@ def compensate_pelvis(label, affine, *, target_pt: float = 20.0,
     F = 0.5 * (L[0] + R[0])
     lr = unit(lr_axis) if lr_axis is not None else unit(R[0] - L[0])
 
-    # sign: rotate the pelvic radius (M->S1 midpoint) so PT moves toward target
+    # sign: rotate the pelvic radius (M->S1 midpoint) so PT moves toward target.
+    #
+    # This deliberately uses the OVER-MASK anchor, not the library default
+    # (spine.pi_anchor_point / "corner", the radiographic convention that metrics.py
+    # now reports PI/PT with). The direction is chosen from a PROXY angle -- the pelvic
+    # radius against vertical -- rather than by re-measuring PT, and that proxy was
+    # tuned against the over-mask anchor. With the corner anchor it can pick the wrong
+    # direction on coarse geometry: on the test phantom the two anchors sit 0.6 mm
+    # apart, yet the rotation flipped, driving SS 17.1 -> 7.1 instead of -> 21.0 while
+    # PT barely moved. That is a limitation of the proxy, NOT of the corner anchor.
+    #
+    # Fixing it properly means deriving the direction analytically, or re-measuring PT
+    # per candidate rotation, instead of comparing proxy angles. Until then this is
+    # pinned and explicit rather than silently divergent. Note the docstring above
+    # already directs callers to predict_compensated_alignment for post-op ANGLES --
+    # that path is exact and anchor-independent.
     m = endplate_overmask_midpoint_from_label(label, affine, "S1", sup_axis, "superior")
     th = float(np.deg2rad(pt - target_pt))
     if m is not None:

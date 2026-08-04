@@ -293,9 +293,15 @@ def test_compensate_pelvis_voxel_releases_retroversion():
     lossy at phantom resolution, so this only checks direction + the no-op guard)."""
     from ostk import surgery
     label, A = _phantom_spine(), np.eye(4)
-    pre = metrics.spinopelvic_summary_from_label(label, A)
+    # Measure with the SAME anchor compensate_pelvis drives on. That helper picks its
+    # rotation direction from a proxy angle tuned against the over-mask anchor (see the
+    # comment at its call site); the library default for reported PI/PT is "corner", the
+    # radiographic convention. Scoring an over-mask-driven rotation with a corner-anchored
+    # PT is measuring the mismatch, not the helper.
+    ANCHOR = "overmask"
+    pre = metrics.spinopelvic_summary_from_label(label, A, pi_anchor=ANCHOR)
     out = surgery.compensate_pelvis(label, A, target_pt=pre["PT"] - 6.0)
-    post = metrics.spinopelvic_summary_from_label(out, A)
+    post = metrics.spinopelvic_summary_from_label(out, A, pi_anchor=ANCHOR)
     assert post["PT"] < pre["PT"] - 2.0                         # retroversion released
     same = surgery.compensate_pelvis(label, A, target_pt=pre["PT"] + 5.0)   # already below
     assert np.array_equal(same, label)                          # no-op guard

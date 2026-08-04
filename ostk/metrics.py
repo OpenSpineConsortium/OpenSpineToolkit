@@ -131,8 +131,31 @@ def _pi_from_plane(m, n, ep_rms, cL, cR, sup_axis=WORLD_SUPERIOR,
     }
 
 
+# Where PI/PT are measured FROM on the S1 superior endplate. Both anchors lie on the
+# same rim line, so neither changes SS or LL -- only PI and PT move.
+#
+#   "corner"   bisect the endplate between its anterior and posterior corners. This is
+#              the operational method PI was DEFINED with on lateral radiographs
+#              (Legaye/Duval-Beaupere), so it is the convention the published PI norms
+#              and the Schwab targets calibrated against carry. It is also the only
+#              anchor derivable from landmarks visible on a radiograph, so it is what
+#              XRSpinoPelvic1K's model can reproduce -- keeping CT- and XR-derived PI
+#              on one definition.
+#   "overmask" centre of the endplate portion actually backed by vertebral body,
+#              projected onto the rim. Kept because it is the right question for
+#              anything that needs the OVER-BODY extent -- notably ALIF cage seating
+#              in ostk.surgery, which still uses it deliberately.
+#
+# On case 0003 they sit 7.4 mm apart along the rim (0.0 mm perpendicular), moving PI/PT
+# by ~2-3 deg. An earlier comment here attributed that gap to the anterior tangent skip
+# biasing the corner midpoint posteriorly; measured, `ant_skip` 0.08 -> 0.00 moves the
+# corner midpoint only 1.5 mm of the 7.4 mm, so that explains ~20% of it. The two are
+# genuinely different points, not one point and its correction.
+from .spine import PI_ANCHOR_DEFAULT           # single source of truth
+
+
 def _pi_from_label_core(label, affine, sup_axis, endplate_frac, head_frac,
-                        min_voxels):
+                        min_voxels, pi_anchor: str = PI_ANCHOR_DEFAULT):
     """Extract the PI/SS/PT result dict from a v3 label volume (shared by the
     PI Measurement and the spinopelvic summary). The S1 superior endplate uses the
     shared `ostk.spine` endplate primitive (anterior band + true top-surface fit —
@@ -141,7 +164,7 @@ def _pi_from_label_core(label, affine, sup_axis, endplate_frac, head_frac,
     centres use the robust acetabular-interface sphere fit (`femoral_head_center`),
     not a cranial slab. `endplate_frac` is kept for signature compatibility but no
     longer used. Returns (result_dict_or_None, flags)."""
-    from .spine import endplate_from_label, endplate_overmask_midpoint_from_label
+    from .spine import endplate_from_label
 
     flags: list = []
     ep_plane = endplate_from_label(label, affine, "S1", "superior",
@@ -162,12 +185,14 @@ def _pi_from_label_core(label, affine, sup_axis, endplate_frac, head_frac,
 
     (cL, rL, eL), (cR, rR, eR) = L, R
     m, n, ep_rms = ep_plane
-    # PI/PT radius origin = midpoint of the endplate portion over the body, on the rim
-    # (more accurate than the corner-midpoint, which the anterior tangent skip biases
-    # posterior). Orientation (n) is unchanged, so SS/LL are unaffected.
-    om = endplate_overmask_midpoint_from_label(label, affine, "S1", sup_axis, "superior")
-    if om is not None:
-        m = om
+    # PI/PT radius origin -- ONE definition, shared with surgery via spine.pi_anchor_point.
+    # Orientation (n) is unchanged either way, so SS/LL never move.
+    from .spine import pi_anchor_point
+    _a = pi_anchor_point(label, affine, sup_axis=sup_axis, mode=pi_anchor)
+    if _a is not None:
+        m = _a
+    else:
+        flags.append(f"pi_anchor_failed:{pi_anchor}")        # keep the plane centroid
     r = _pi_from_plane(m, n, ep_rms, cL, cR, sup_axis, rL=rL, rR=rR, eL=eL, eR=eR)
     if abs(r["SS"] + r["PT"] - r["PI"]) > 1.0:         # geometric identity check
         flags.append("identity_violation")
@@ -177,12 +202,13 @@ def _pi_from_label_core(label, affine, sup_axis, endplate_frac, head_frac,
 def pelvic_incidence_from_label(label, affine, *, case_id: str = "",
                                 sup_axis=WORLD_SUPERIOR, endplate_frac: float = 0.15,
                                 head_frac: float = 0.35,
-                                min_voxels: int = 50) -> Measurement:
+                                min_voxels: int = 50,
+                                pi_anchor: str = PI_ANCHOR_DEFAULT) -> Measurement:
     """Compose PI from a v3 label volume. Returns a Measurement with QC flags
     (never silently drops a bad case). SS/PT are available via
     `spinopelvic_summary_from_label`."""
     r, flags = _pi_from_label_core(label, affine, sup_axis, endplate_frac,
-                                   head_frac, min_voxels)
+                                   head_frac, min_voxels, pi_anchor=pi_anchor)
     if r is None:
         return Measurement(case_id=case_id, parameter="pelvic_incidence",
                            value=None, qc_flags=flags,
@@ -494,7 +520,8 @@ def spinopelvic_summary_from_label(label, affine, *, case_id: str = "",
                                    sup_axis=WORLD_SUPERIOR,
                                    endplate_frac: float = 0.15,
                                    head_frac: float = 0.35,
-                                   min_voxels: int = 30) -> Dict:
+                                   min_voxels: int = 30,
+                                   pi_anchor: str = PI_ANCHOR_DEFAULT) -> Dict:
     """One-call clinical summary of every Greenberg §73 spinopelvic parameter
     computable from a v3 (Vert + S1 + femur) label: PI / SS / PT (PI valid on
     supine CT; SS/PT supine surrogates), LL, PI−LL mismatch, and the SRS-Schwab
@@ -503,7 +530,7 @@ def spinopelvic_summary_from_label(label, affine, *, case_id: str = "",
     dict; values are None where their inputs were unavailable (flagged, never
     silently dropped)."""
     pi_r, pi_flags = _pi_from_label_core(label, affine, sup_axis, endplate_frac,
-                                         head_frac, min_voxels)
+                                         head_frac, min_voxels, pi_anchor=pi_anchor)
     ll_m = lumbar_lordosis_from_label(
         label, affine, case_id=case_id, sup_axis=sup_axis,
         endplate_frac=endplate_frac, head_frac=head_frac, min_voxels=min_voxels)
