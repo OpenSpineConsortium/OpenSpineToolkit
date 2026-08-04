@@ -44,7 +44,8 @@ import numpy as np
 from .geometry import (WORLD_SUPERIOR, fit_plane_tls, fit_sphere, project_out,
                        project_to_plane_2d, unit)
 from .metrics import LL_ENDPLATE_CHAIN, femoral_head_center
-from .spine import anterior_axis, endplate_from_label, endplate_overmask_midpoint_from_label
+from .spine import (PI_ANCHOR_DEFAULT, anterior_axis, endplate_from_label,
+                    pi_anchor_point)
 
 
 def sagittal_axes(lr_axis, sup_axis=WORLD_SUPERIOR):
@@ -108,12 +109,20 @@ def pi_landmarks_2d(endplate_points, femhead_left_points, femhead_right_points,
 def pelvic_incidence_2d_from_label(label, affine, *, sup_axis=WORLD_SUPERIOR,
                                    endplate_frac: float = 0.15,
                                    head_frac: float = 0.35,
-                                   min_voxels: int = 50) -> Optional[Dict]:
+                                   min_voxels: int = 50,
+                                   pi_anchor: str = PI_ANCHOR_DEFAULT) -> Optional[Dict]:
     """Label-volume wrapper for pi_landmarks_2d, mirroring
     metrics._pi_from_label_core: S1's endplate via spine.endplate_from_label,
     femoral heads via the robust acetabular-interface fit
-    (metrics.femoral_head_center), and the PI/PT radius origin corrected to
-    the endplate-over-mask midpoint (spine.endplate_overmask_midpoint_from_label).
+    (metrics.femoral_head_center), and the PI/PT radius origin from the SHARED
+    spine.pi_anchor_point.
+
+    The anchor comes from that one helper rather than being resolved here, so this
+    projection and metrics can never drift apart -- which they briefly did: this
+    hardcoded the over-mask midpoint while metrics moved to the corner midpoint (the
+    radiographic convention), and test_pelvic_incidence_2d_from_label_matches_pi_measurement
+    caught the 2 deg divergence immediately.
+
     `endplate_frac` is kept for signature compatibility but no longer used
     (matching _pi_from_label_core). Returns None if a landmark is unavailable."""
     ep_plane = endplate_from_label(label, affine, "S1", "superior",
@@ -126,9 +135,9 @@ def pelvic_incidence_2d_from_label(label, affine, *, sup_axis=WORLD_SUPERIOR,
         return None
     (cL, rL, eL), (cR, rR, eR) = L, R
     m, n, ep_rms = ep_plane
-    om = endplate_overmask_midpoint_from_label(label, affine, "S1", sup_axis, "superior")
-    if om is not None:
-        m = om
+    a = pi_anchor_point(label, affine, sup_axis=sup_axis, mode=pi_anchor)
+    if a is not None:
+        m = a
     return _pi_landmarks_2d_from_fit(m, n, ep_rms, cL, rL, eL, cR, rR, eR, sup_axis)
 
 
@@ -138,7 +147,7 @@ def pelvic_incidence_2d_from_label(label, affine, *, sup_axis=WORLD_SUPERIOR,
 
 def ll_landmarks_2d(endplate_normals: Dict[str, np.ndarray],
                     endplate_centroids: Dict[str, np.ndarray], lr_axis,
-                    sup_axis=WORLD_SUPERIOR) -> Dict:
+                    sup_axis=WORLD_SUPERIOR, origin=None) -> Dict:
     """Orthographic 2D sagittal-plane projection of the per-level endplate
     landmarks metrics.lumbar_lordosis's LL/segment Cobb angles are computed
     from. `endplate_normals`/`endplate_centroids` share keys (a cranial->caudal
@@ -148,7 +157,13 @@ def ll_landmarks_2d(endplate_normals: Dict[str, np.ndarray],
     if len(present) < 2:
         return {"landmarks_2d_mm": {}, "endplate_normals_2d": {}, "levels": present}
     ant, cranial = sagittal_axes(lr_axis, sup_axis)
-    origin = endplate_centroids[present[0]]
+    # `origin` may be supplied so LL shares a frame with the PI landmarks (and with a
+    # DRR). Defaulting to the first level's centroid means LL coordinates are based at
+    # L1 while PI's are based at the bicoxofemoral axis, so drawing both on one image
+    # requires lifting one back through world space -- an easy thing to get wrong, and
+    # a caller that gets it wrong produces a plausible-looking but displaced overlay.
+    if origin is None:
+        origin = endplate_centroids[present[0]]
     landmarks_2d = {lv: project_to_plane_2d(endplate_centroids[lv], origin,
                                             ant, cranial).tolist()
                     for lv in present}
@@ -166,7 +181,8 @@ def ll_landmarks_2d(endplate_normals: Dict[str, np.ndarray],
 def lumbar_lordosis_2d_from_label(label, affine, *, sup_axis=WORLD_SUPERIOR,
                                   endplate_frac: float = 0.15,
                                   head_frac: float = 0.35,
-                                  min_voxels: int = 30) -> Optional[Dict]:
+                                  min_voxels: int = 30,
+                                  origin=None) -> Optional[Dict]:
     """Label-volume wrapper for ll_landmarks_2d. Reuses
     metrics._lr_axis_from_label and metrics._endplate_normal_from_label (the
     same per-case extraction metrics.lumbar_lordosis_from_label uses) so the
@@ -187,4 +203,4 @@ def lumbar_lordosis_2d_from_label(label, affine, *, sup_axis=WORLD_SUPERIOR,
             normals[lv], centroids[lv] = n, c
     if len(normals) < 2:
         return None
-    return ll_landmarks_2d(normals, centroids, lr, sup_axis)
+    return ll_landmarks_2d(normals, centroids, lr, sup_axis, origin=origin)

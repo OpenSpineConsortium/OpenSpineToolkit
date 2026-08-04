@@ -143,7 +143,7 @@ def spinopelvic_summary_2d(endplates: Dict[str, Line], femoral: Optional[Pt] = N
 
 # ---- 2-D LABEL MASK -> endplate lines (so a 2-D seg routes like the 3-D one) -
 def endplates_from_mask_2d(mask, *, sup=(0, 1), endplate_frac: float = 0.30,
-                           min_pixels: int = 20):
+                           head_frac: float = 0.35, min_pixels: int = 20):
     """Extract per-vertebra SUPERIOR endplate lines + the femoral-head point from a 2-D
     label mask (same ostk label ids as 3-D). The superior endplate = a line fit through
     the top `endplate_frac` slab of each body (the 2-D analogue of the 3-D slab + plane
@@ -165,15 +165,29 @@ def endplates_from_mask_2d(mask, *, sup=(0, 1), endplate_frac: float = 0.30,
         e = _long_axis_2d(slab) if len(slab) >= 3 else _perp(sup)
         half = 0.5 * float((slab @ e).max() - (slab @ e).min()) or 10.0
         endplates[name] = (c - half * e, c + half * e)
-    # femoral-head point = midpoint of the two femoral-head circle centers
+    # Femoral-head point = midpoint of the two femoral-head circle centres.
+    #
+    # FEMORA ONLY. This previously circle-fitted left_hip/right_hip as well and averaged
+    # all four: the innominate is not a circle, so its "centre" is meaningless and it
+    # dragged the point off. Measured on a projected case, dropping the hips moved the
+    # femoral point ~10 px, which lands directly on PI and PT (they are measured FROM
+    # the femoral-head axis) while leaving SS and LL untouched.
+    #
+    # The head is the SUPERIOR portion of the femur silhouette; fitting the whole femur
+    # includes shaft and trochanter and biases the centre inferolaterally, so restrict to
+    # the top `head_frac` before fitting -- the 2-D analogue of the 3-D acetabular-slab
+    # sphere fit in metrics.femoral_head_center.
     fem = []
-    for name in ("femur_left", "femur_right", "left_hip", "right_hip"):
+    for name in ("femur_left", "femur_right"):
         lid = LABELS.get(name)
         if lid is None:
             continue
         pts = np.argwhere(m == lid)[:, ::-1].astype(float)
-        if len(pts) >= min_pixels:
-            fem.append(fit_circle_2d(pts)[0])
+        if len(pts) < min_pixels:
+            continue
+        s_f = pts @ sup
+        head = pts[s_f >= np.quantile(s_f, 1.0 - head_frac)]
+        fem.append(fit_circle_2d(head if len(head) >= min_pixels else pts)[0])
     femoral = (np.mean(fem, axis=0) if fem else None)
     return endplates, femoral
 

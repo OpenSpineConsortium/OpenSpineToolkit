@@ -192,5 +192,30 @@ def sagittal_drr_from_label(label, ct_volume, affine, *, sup_axis=WORLD_SUPERIOR
         "axes": {"anterior": ant.tolist(), "cranial": cranial.tolist(), "lr": lr.tolist()},
         "shape": [H, W],
         "fov_mm": [float(width_mm), float(height_mm)],
+        # In-plane extent of the rendered grid, in the (anterior, cranial) frame above.
+        # Without this a caller cannot place project2d's landmarks -- which come back in
+        # plane-mm -- onto the image this function just rendered, which is the ONE thing
+        # an overlay needs. Reconstructing it externally means duplicating _framing_points
+        # and DEFAULT_MARGIN_MM, i.e. a private detail becomes load-bearing in a caller.
+        "extent_mm": [float(u_min), float(v_min), float(u_max), float(v_max)],
         "method_version": DRR_METHOD_VERSION,
     }
+
+
+def plane_to_pixel(plan, points_2d):
+    """Plane-mm (anterior, cranial) -> detector pixel (col, row), for a `plan` returned
+    by sagittal_drr_from_label. Inverse of the grid it renders, including the final
+    img[::-1, ::-1] that puts superior up and anterior left.
+
+    Exists so overlaying project2d landmarks is one call rather than a reimplementation
+    of the framing.
+    """
+    import numpy as _np
+    u_min, v_min = plan["extent_mm"][0], plan["extent_mm"][1]
+    sp = plan["pixel_spacing_mm"]
+    H, W = plan["shape"]
+    p = _np.atleast_2d(_np.asarray(points_2d, float))
+    col = (W - 1) - ((p[:, 0] - u_min) / sp - 0.5)
+    row = (H - 1) - ((p[:, 1] - v_min) / sp - 0.5)
+    out = _np.stack([col, row], axis=-1)
+    return out[0] if _np.ndim(points_2d) == 1 else out
