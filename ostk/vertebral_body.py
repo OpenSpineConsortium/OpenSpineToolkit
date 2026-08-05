@@ -296,7 +296,7 @@ def endplate_corners_body(mask, affine, which: str = "superior", *,
                           sup_axis=WORLD_SUPERIOR, lr=(1.0, 0.0, 0.0),
                           core_mm: float = 4.0, ransac_mm: float = 1.5,
                           lat_frac: float = 0.45, min_points: int = 30,
-                          canal_from=None):
+                          canal_from=None, body=None):
     """Endplate corners of ONE vertebra, from its whole-vertebra mask.
 
     body_mask -> medial band -> endplate surface -> RANSAC plane -> A-P extremes of the
@@ -312,8 +312,13 @@ def endplate_corners_body(mask, affine, which: str = "superior", *,
     # pass the CALLER's axes through -- defaulting silently to the world axes made this
     # correct only when the caller happened to use them, which a test harness does and
     # the DRR path (detector cranial axis, beam direction) does not
-    body = body_mask(m, affine, sup_axis=sup_axis, lr=lr, core_mm=core_mm,
-                     canal_from=canal_from)
+    # `body` lets the caller isolate ONCE and reuse it for both endplate faces. The
+    # isolation (per-section hole fill + the anterior cut) is the expensive step and it is
+    # a property of the vertebra, not of which face is being fitted -- recomputing it per
+    # face doubled the cost of every case for no change in result.
+    if body is None:
+        body = body_mask(m, affine, sup_axis=sup_axis, lr=lr, core_mm=core_mm,
+                         canal_from=canal_from)
     if body is None or body.sum() < min_points:
         return None
     idx = np.array(np.nonzero(body)).T
@@ -335,10 +340,95 @@ def endplate_corners_body(mask, affine, which: str = "superior", *,
     keep = surf[inl]
     if len(keep) < 4:
         return None
-    rms = float(np.sqrt(np.mean(((keep - c) @ n) ** 2)))
     ap = anterior_axis(unit(sup_axis), lr)
-    t = keep @ ap
-    return keep[int(np.argmax(t))], keep[int(np.argmin(t))], rms, int(inl.sum())
+    a_ax = unit(sup_axis)
+    # ---- corners = endplate tangent x cortical WALL (Frobin) ------------------------
+    # A corner is CONSTRUCTED, not observed. The last voxel on the endplate stops where
+    # the cortex begins curving up into the wall, so the posterior corner quits before
+    # the body surface turns -- exactly the "not posterior enough" seen on L1-L3. The
+    # reader's construction is to run the endplate tangent back until it meets the
+    # posterior wall, which stays well defined where the surface itself is not.
+    #   Frobin W, Brinckmann P, Biggemann M, Tillotson M, Burton K. Clin Biomech
+    #     1997;12(Suppl 1):S1-S63 -- vertebral body as a quadrilateral, corners as the
+    #     endplate x wall intersections; the reference method for lateral-radiograph
+    #     vertebral morphometry.
+    #   Hurxthal LM. Am J Roentgenol 1968;103(3):635-644.
+    #   Black DM, Palermo L, Nevitt MC, et al. J Bone Miner Res 1995;10(6):890-902.
+    # Osteophytes fall out for free: each line is fitted by RANSAC over its own cortical
+    # margin, and a spondylophyte is a gross outlier to both the plate it grows from and
+    # the wall it projects past, so it can move neither. Measure the body, ignore the spur.
+    #
+    # The plate is refit to the RIM first, because a plane fitted to the whole surface is
+    # dragged into the endplate's central concavity; the clinical line is the tangent
+    # bridging that concavity, the same construction a Cobb line uses.
+    t_all = surf @ ap
+    lo_t, hi_t = np.quantile(t_all, [0.25, 0.75])
+    rim = surf[(t_all <= lo_t) | (t_all >= hi_t)]
+    fit2 = fit_plane_ransac(rim, thresh_mm=ransac_mm) if len(rim) >= 6 else None
+    if fit2 is not None:
+        c, n, _ = fit2
+    d_plane = np.abs((surf - c) @ n)
+    on_plate = surf[d_plane <= max(ransac_mm, 1.5)]
+    if len(on_plate) < 4:
+        on_plate = keep
+    rms = float(np.sqrt(np.mean(((on_plate - c) @ n) ** 2)))
+
+    # cortical walls, from the body's own A-P margins per height bin
+    hgt = pts @ a_ax
+    apc = pts @ ap
+    nb = 24
+    hb = np.floor((hgt - hgt.min()) / (np.ptp(hgt) + 1e-9) * nb).astype(int)
+    ant_pts, post_pts = [], []
+    for k in np.unique(hb):
+        m_k = hb == k
+        ant_pts.append(pts[m_k][int(np.argmax(apc[m_k]))])
+        post_pts.append(pts[m_k][int(np.argmin(apc[m_k]))])
+    ant_pts, post_pts = np.array(ant_pts), np.array(post_pts)
+    # drop the top/bottom bins: there the "wall" is really the endplate rim turning over
+    def _mid(w):
+        if len(w) < 8:
+            return w
+        h = w @ a_ax
+        lo_h, hi_h = np.quantile(h, [0.25, 0.75])
+        t = w[(h >= lo_h) & (h <= hi_h)]
+        return t if len(t) >= 4 else w
+    wall_a = fit_plane_ransac(_mid(ant_pts), thresh_mm=ransac_mm)
+    wall_p = fit_plane_ransac(_mid(post_pts), thresh_mm=ransac_mm)
+
+    # the endplate TANGENT, in the sagittal plane, lying in the plate
+    u = ap - (ap @ n) * n
+    nu = np.linalg.norm(u)
+    if nu < 1e-9:
+        return None
+    u = u / nu
+
+    def _hit(wall, sign, max_extend_mm=8.0):
+        """Where the tangent meets the wall, BOUNDED by the on-plate extreme.
+
+        The extreme is already within a few mm of the wall -- the intersection only has
+        to carry the corner the last bit, over the turn where the cortex curves away.
+        So it is accepted only if it lies outward of the extreme by at most
+        `max_extend_mm`, and never inward. Unbounded, a wall plane that happens to run
+        near-parallel to the tangent throws the corner tens of mm away: measured
+        excursions of 30 mm at 0003 L1 and 28 mm past the canal at S1. `sign` is +1 for
+        the anterior corner, -1 for the posterior.
+        """
+        t2 = on_plate @ ap
+        base = on_plate[int(np.argmax(t2))] if sign > 0 else on_plate[int(np.argmin(t2))]
+        base = base - ((base - c) @ n) * n
+        t_base = float((base - c) @ u)
+        if wall is not None:
+            cw, nw, _ = wall
+            den = float(u @ nw)
+            if abs(den) > 1e-6:
+                t_w = float((cw - c) @ nw) / den
+                # outward of the extreme, by no more than max_extend_mm
+                lo, hi = (t_base, t_base + max_extend_mm) if sign > 0 else                          (t_base - max_extend_mm, t_base)
+                if lo <= t_w <= hi:
+                    return c + t_w * u
+        return base
+
+    return _hit(wall_a, +1), _hit(wall_p, -1), rms, int(len(on_plate))
 
 
 def body_mask(mask, affine, *, sup_axis=WORLD_SUPERIOR, lr=(1.0, 0.0, 0.0),
@@ -354,3 +444,167 @@ def body_mask(mask, affine, *, sup_axis=WORLD_SUPERIOR, lr=(1.0, 0.0, 0.0),
     if b is not None and b.any():
         return b
     return body_mask_watershed(mask, affine, core_mm=core_mm)
+
+
+# ---------------------------------------------------------------------------
+# Frobin quadrilateral: corners as endplate x wall intersections
+# ---------------------------------------------------------------------------
+
+def _fit_line_ransac(xy, *, thresh_mm: float = 1.5, iters: int = 300, seed: int = 0):
+    """Robust 2-D line as (point, unit direction), or None. RANSAC, same rationale as
+    the plane fit: an osteophyte is a gross outlier and must not tilt the line."""
+    P = np.asarray(xy, float)
+    if len(P) < 2:
+        return None
+    rng = np.random.default_rng(seed)
+    best = None
+    for _ in range(int(iters)):
+        i, j = rng.choice(len(P), size=2, replace=False)
+        d = P[j] - P[i]
+        nn = np.linalg.norm(d)
+        if nn < 1e-9:
+            continue
+        d = d / nn
+        nrm = np.array([-d[1], d[0]])
+        inl = np.abs((P - P[i]) @ nrm) <= thresh_mm
+        if best is None or inl.sum() > best.sum():
+            best = inl
+    if best is None or best.sum() < 2:
+        return None
+    Q = P[best]
+    c = Q.mean(0)
+    _, _, vt = np.linalg.svd(Q - c, full_matrices=False)
+    return c, vt[0] / np.linalg.norm(vt[0])
+
+
+def _intersect(l1, l2):
+    (p1, d1), (p2, d2) = l1, l2
+    A = np.array([[d1[0], -d2[0]], [d1[1], -d2[1]]])
+    det = np.linalg.det(A)
+    if abs(det) < 1e-9:                      # parallel: no corner
+        return None
+    t = np.linalg.solve(A, np.asarray(p2, float) - np.asarray(p1, float))
+    return np.asarray(p1, float) + t[0] * np.asarray(d1, float)
+
+
+def body_quad_corners(mask, affine, *, sup_axis=WORLD_SUPERIOR, lr=(1.0, 0.0, 0.0),
+                      lat_frac: float = 0.45, ransac_mm: float = 1.5,
+                      edge_frac: float = 0.30, canal_from=None, body=None,
+                      min_points: int = 30):
+    """All four vertebral body corners, as endplate x wall INTERSECTIONS.
+
+    The Frobin method: in the midsagittal plane the vertebral body is a quadrilateral
+    bounded by the superior and inferior endplates and the anterior and posterior
+    cortical walls, and the corners are where those four lines meet.
+
+      Frobin W, Brinckmann P, Biggemann M, Tillotson M, Burton K. "Precision
+        measurement of disc height, vertebral height and sagittal plane displacement
+        from lateral radiographic views of the lumbar spine."
+        Clin Biomech 1997;12(Suppl 1):S1-S63.
+      Hurxthal LM. "Measurement of anterior vertebral compressions and biconcave
+        vertebrae." Am J Roentgenol 1968;103(3):635-644.
+      Black DM, Palermo L, Nevitt MC, et al. "Comparison of methods for defining
+        prevalent vertebral deformities." J Bone Miner Res 1995;10(6):890-902.
+
+    Why an intersection rather than the extreme surface voxel: a corner is a CONSTRUCTED
+    point, not an observed one. Taking the last voxel on the endplate stops wherever the
+    cortex begins to curve up into the posterior wall, which lands the posterosuperior
+    corner short -- visible on an overlay as a posterior corner that quits before the
+    body surface turns. Extending the endplate tangent to meet the wall line is exactly
+    what a reader draws, and it stays well defined where the surface itself is not.
+
+    Osteophyte handling comes free: each of the four lines is fitted by RANSAC over its
+    own cortical margin, and a spondylophyte is a gross outlier to both the plate it
+    grows from and the wall it projects past, so it cannot move either line. This is the
+    morphometric convention -- measure the body, ignore the spur.
+
+    Returns dict with sup_ant / sup_post / inf_ant / inf_post as world-mm points, plus
+    per-line rms and inlier counts, or None.
+    """
+    m = np.asarray(mask, bool)
+    if body is None:
+        body = body_mask(m, affine, sup_axis=sup_axis, lr=lr, canal_from=canal_from)
+    if body is None or body.sum() < min_points:
+        return None
+    idx = np.array(np.nonzero(body)).T
+    P = (np.c_[idx, np.ones(len(idx))] @ np.asarray(affine, float).T)[:, :3]
+    a = unit(sup_axis)
+    lrv = unit(lr)
+    ap = anterior_axis(a, lr)
+    if 0.0 < lat_frac < 1.0:                 # midsagittal band: drops TPs and sacral alae
+        lp = P @ lrv
+        lo, hi = np.quantile(lp, [(1 - lat_frac) / 2, 1 - (1 - lat_frac) / 2])
+        P = P[(lp >= lo) & (lp <= hi)]
+    if len(P) < min_points:
+        return None
+    mid_lr = float(np.median(P @ lrv))
+    x, y = P @ ap, P @ a                     # 2-D midsagittal: anterior, cranial
+
+    def margin(u, v, take_max, bins=24):
+        """Extreme v per bin of u -- one cortical margin of the outline."""
+        b = np.floor((u - u.min()) / (np.ptp(u) + 1e-9) * bins).astype(int)
+        out = []
+        for k in np.unique(b):
+            s = b == k
+            j = np.argmax(v[s]) if take_max else np.argmin(v[s])
+            out.append([u[s][j], v[s][j]])
+        return np.array(out)
+
+    sup_m = margin(x, y, True)               # superior endplate
+    inf_m = margin(x, y, False)              # inferior endplate
+    ant_m = margin(y, x, True)               # anterior wall
+    post_m = margin(y, x, False)             # posterior wall
+    # walls: keep the MIDDLE of the height range, so the fit is the wall proper and not
+    # the rims where it turns into the endplates
+    def trim(mm, frac):
+        if len(mm) < 6:
+            return mm
+        lo, hi = np.quantile(mm[:, 0], [frac, 1 - frac])
+        t = mm[(mm[:, 0] >= lo) & (mm[:, 0] <= hi)]
+        return t if len(t) >= 4 else mm
+    ant_m, post_m = trim(ant_m, edge_frac), trim(post_m, edge_frac)
+
+    def rims(mm, frac=0.30):
+        """Keep only the PERIPHERAL margin points -- the endplate rims.
+
+        The clinical endplate line is a TANGENT bridging the endplate's central
+        concavity, the same construction a Cobb line uses; it is not a least-squares fit
+        to the whole plate. Fitting the full margin drags the line into the concavity and
+        the residual shows it: 4.3-8.8 mm against 0.1-0.4 mm for the cortical walls,
+        which have no concavity to fall into.
+        """
+        if len(mm) < 8:
+            return mm
+        lo, hi = np.quantile(mm[:, 0], [frac, 1 - frac])
+        r = mm[(mm[:, 0] <= lo) | (mm[:, 0] >= hi)]
+        return r if len(r) >= 4 else mm
+    sup_m, inf_m = rims(sup_m), rims(inf_m)
+
+    L = {}
+    for k, mm, swap in (("sup", sup_m, False), ("inf", inf_m, False),
+                        ("ant", ant_m, True), ("post", post_m, True)):
+        pts = mm[:, ::-1] if swap else mm    # wall margins are (height, ap) -> (ap, height)
+        f = _fit_line_ransac(pts, thresh_mm=ransac_mm)
+        if f is None:
+            return None
+        L[k] = f
+
+    def to_world(p2):
+        return mid_lr * lrv + float(p2[0]) * ap + float(p2[1]) * a
+
+    out = {}
+    for name, (pl, wl) in (("sup_ant", ("sup", "ant")), ("sup_post", ("sup", "post")),
+                           ("inf_ant", ("inf", "ant")), ("inf_post", ("inf", "post"))):
+        q = _intersect(L[pl], L[wl])
+        if q is None:
+            return None
+        out[name] = to_world(q)
+
+    def rms_of(k, mm, swap):
+        pts = mm[:, ::-1] if swap else mm
+        c, d = L[k]
+        nrm = np.array([-d[1], d[0]])
+        return float(np.sqrt(np.mean(((pts - c) @ nrm) ** 2)))
+    out["rms"] = {"sup": rms_of("sup", sup_m, False), "inf": rms_of("inf", inf_m, False),
+                  "ant": rms_of("ant", ant_m, True), "post": rms_of("post", post_m, True)}
+    return out
