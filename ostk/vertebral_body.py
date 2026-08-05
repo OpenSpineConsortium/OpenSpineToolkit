@@ -296,7 +296,7 @@ def endplate_corners_body(mask, affine, which: str = "superior", *,
                           sup_axis=WORLD_SUPERIOR, lr=(1.0, 0.0, 0.0),
                           core_mm: float = 4.0, ransac_mm: float = 1.5,
                           lat_frac: float = 0.45, min_points: int = 30,
-                          canal_from=None, body=None):
+                          canal_from=None, body=None, edge_trim_frac: float = 0.12):
     """Endplate corners of ONE vertebra, from its whole-vertebra mask.
 
     body_mask -> medial band -> endplate surface -> RANSAC plane -> A-P extremes of the
@@ -361,9 +361,26 @@ def endplate_corners_body(mask, affine, which: str = "superior", *,
     # The plate is refit to the RIM first, because a plane fitted to the whole surface is
     # dragged into the endplate's central concavity; the clinical line is the tangent
     # bridging that concavity, the same construction a Cobb line uses.
+    # Drop the outermost A-P columns FIRST. Past the edge of the plate the topmost
+    # voxel in a column is no longer endplate at all -- it is the cortical WALL, tens of
+    # mm lower. On 0003 L1 the superior surface reads (posterior->anterior)
+    #     hgt 12 14 14 15 16 17 18 19 23 21  4  2
+    # and those last columns are the anterior wall. Because the rim refit deliberately
+    # samples the OUTER quartiles, it sampled exactly that contamination and RANSAC
+    # locked onto a confident, self-consistent, wrong plane: L1's superior plate came out
+    # at -16.6 deg against +20.1 for its own inferior, with rms a healthy 0.74 -- which is
+    # why a residual threshold cannot catch this. rms measures how well the points fit the
+    # plane that was chosen, not whether the right points were chosen.
     t_all = surf @ ap
-    lo_t, hi_t = np.quantile(t_all, [0.25, 0.75])
-    rim = surf[(t_all <= lo_t) | (t_all >= hi_t)]
+    span_ap = float(np.ptp(t_all))
+    lo_e = float(np.min(t_all)) + edge_trim_frac * span_ap
+    hi_e = float(np.max(t_all)) - edge_trim_frac * span_ap
+    core = surf[(t_all >= lo_e) & (t_all <= hi_e)]
+    if len(core) < 8:
+        core = surf
+    t_core = core @ ap
+    lo_t, hi_t = np.quantile(t_core, [0.25, 0.75])
+    rim = core[(t_core <= lo_t) | (t_core >= hi_t)]
     fit2 = fit_plane_ransac(rim, thresh_mm=ransac_mm) if len(rim) >= 6 else None
     if fit2 is not None:
         c, n, _ = fit2
