@@ -572,6 +572,17 @@ def _intersect(l1, l2):
     return np.asarray(p1, float) + t[0] * np.asarray(d1, float)
 
 
+# !! NOT WIRED IN, AND CURRENTLY BROKEN. Kept because the FORMULATION is right -- a
+# !! parametric quadrilateral fitted to the body is the cleanest statement of what a
+# !! corner is -- but the fit is not. Measured on 0003 the superior plate margins fit at
+# !! rms 6-10 mm against 0.3-1.7 for the inferior ones, and several corners come back
+# !! NaN. Cause is known, not yet solved: past the plate's edge the extreme voxel in a
+# !! column belongs to the cortical WALL, and Tukey's IRLS starts from an UNWEIGHTED
+# !! least-squares fit, so a large contaminated set inflates the initial residual scale
+# !! and then survives its own rejection test. Trimming the outer columns did not fix it.
+# !! What it needs is a robust SEED (RANSAC or repeated-median) before the IRLS so the
+# !! initial scale is not set by the contamination. The LIVE path is
+# !! endplate_corners_body + xrsp.oblique.extend_in_body.
 def body_quad_corners(mask, affine, *, sup_axis=WORLD_SUPERIOR, lr=(1.0, 0.0, 0.0),
                       lat_frac: float = 0.45, ransac_mm: float = 1.5,
                       edge_frac: float = 0.30, canal_from=None, body=None,
@@ -635,63 +646,86 @@ def body_quad_corners(mask, affine, *, sup_axis=WORLD_SUPERIOR, lr=(1.0, 0.0, 0.
             out.append([u[s][j], v[s][j]])
         return np.array(out)
 
-    sup_m = margin(x, y, True)               # superior endplate
-    inf_m = margin(x, y, False)              # inferior endplate
-    ant_m = margin(y, x, True)               # anterior wall
-    post_m = margin(y, x, False)             # posterior wall
-    # walls: keep the MIDDLE of the height range, so the fit is the wall proper and not
-    # the rims where it turns into the endplates
-    def trim(mm, frac):
-        if len(mm) < 6:
-            return mm
-        lo, hi = np.quantile(mm[:, 0], [frac, 1 - frac])
-        t = mm[(mm[:, 0] >= lo) & (mm[:, 0] <= hi)]
-        return t if len(t) >= 4 else mm
-    ant_m, post_m = trim(ant_m, edge_frac), trim(post_m, edge_frac)
+    # FOUR MARGINS of the midsagittal outline, each fitted with the SAME robust
+    # degree-2 profile model (fit_profile_robust): two endplates and two cortical walls.
+    # One estimator, one code path, all in 3-D -- the corners are then the four
+    # intersections, i.e. a parametric quadrilateral fitted to the body while osteophytes
+    # and Schmorl's nodes carry zero weight. Degree 2 gives the endplates their single
+    # normal concavity and the walls their waisting, and cannot represent a spur.
+    sup_m = margin(x, y, True)               # superior endplate:  y = f(x)
+    inf_m = margin(x, y, False)              # inferior endplate:  y = f(x)
+    ant_m = margin(y, x, True)               # anterior wall:      x = g(y)
+    post_m = margin(y, x, False)             # posterior wall:     x = g(y)
 
-    def rims(mm, frac=0.30):
-        """Keep only the PERIPHERAL margin points -- the endplate rims.
+    def _prof(mm, deg=2, trim=0.0):
+        """Robust profile, optionally trimming the outermost columns first.
 
-        The clinical endplate line is a TANGENT bridging the endplate's central
-        concavity, the same construction a Cobb line uses; it is not a least-squares fit
-        to the whole plate. Fitting the full margin drags the line into the concavity and
-        the residual shows it: 4.3-8.8 mm against 0.1-0.4 mm for the cortical walls,
-        which have no concavity to fall into.
+        The endplate margins need the trim. Past the plate's edge the extreme voxel in a
+        column is the cortical WALL, tens of mm away, and Tukey's IRLS starts from an
+        UNWEIGHTED least-squares fit -- so a large contaminated set inflates the initial
+        residual scale and then survives its own rejection test. Measured: superior
+        margins fitted at rms 3.3-8.2 mm against 0.3-1.3 for the inferior ones, the same
+        asymmetry that broke the other path. The corners come from intersections, so
+        dropping those columns costs nothing.
         """
-        if len(mm) < 8:
-            return mm
-        lo, hi = np.quantile(mm[:, 0], [frac, 1 - frac])
-        r = mm[(mm[:, 0] <= lo) | (mm[:, 0] >= hi)]
-        return r if len(r) >= 4 else mm
-    sup_m, inf_m = rims(sup_m), rims(inf_m)
-
-    L = {}
-    for k, mm, swap in (("sup", sup_m, False), ("inf", inf_m, False),
-                        ("ant", ant_m, True), ("post", post_m, True)):
-        pts = mm[:, ::-1] if swap else mm    # wall margins are (height, ap) -> (ap, height)
-        f = _fit_line_ransac(pts, thresh_mm=ransac_mm)
-        if f is None:
+        if len(mm) < 6:
             return None
-        L[k] = f
+        m2 = mm
+        if trim > 0.0 and len(mm) >= 10:
+            span = float(np.ptp(mm[:, 0]))
+            lo = float(np.min(mm[:, 0])) + trim * span
+            hi = float(np.max(mm[:, 0])) - trim * span
+            k = mm[(mm[:, 0] >= lo) & (mm[:, 0] <= hi)]
+            if len(k) >= 6:
+                m2 = k
+        out = fit_profile_robust(m2[:, 0], m2[:, 1], degree=deg, min_points=5)
+        return None if out is None else out[0]
+
+    Pf = {"sup": _prof(sup_m, trim=edge_frac), "inf": _prof(inf_m, trim=edge_frac),
+          "ant": _prof(ant_m, trim=edge_frac), "post": _prof(post_m, trim=edge_frac)}
+    if any(v is None for v in Pf.values()):
+        return None
+
+    def _corner(plate, wall):
+        """Where an endplate profile y=f(x) meets a wall profile x=g(y).
+
+        Solved by a few fixed-point steps from the wall's value at the plate's mid
+        height: both curves are gentle, so this converges in a handful of iterations and
+        avoids solving a quartic. Deterministic -- no random component.
+        """
+        y0 = float(np.median(sup_m[:, 1] if plate == "sup" else inf_m[:, 1]))
+        xg = float(np.polyval(Pf[wall], y0))
+        for _ in range(24):
+            yf = float(np.polyval(Pf[plate], xg))
+            xn = float(np.polyval(Pf[wall], yf))
+            if abs(xn - xg) < 1e-4:
+                xg = xn
+                break
+            xg = 0.5 * (xg + xn)             # damped, so a steep wall cannot oscillate
+        return np.array([xg, float(np.polyval(Pf[plate], xg))])
 
     def to_world(p2):
+        """Midsagittal (anterior, cranial) back to world mm."""
         return mid_lr * lrv + float(p2[0]) * ap + float(p2[1]) * a
+
+    # clamp into the observed outline: a polynomial extrapolates fast and a corner
+    # cannot lie outside the bone
+    x_lo, x_hi = float(x.min()), float(x.max())
+    y_lo, y_hi = float(y.min()), float(y.max())
 
     out = {}
     for name, (pl, wl) in (("sup_ant", ("sup", "ant")), ("sup_post", ("sup", "post")),
                            ("inf_ant", ("inf", "ant")), ("inf_post", ("inf", "post"))):
-        q = _intersect(L[pl], L[wl])
-        if q is None:
-            return None
+        q = _corner(pl, wl)
+        q[0] = float(np.clip(q[0], x_lo, x_hi))
+        q[1] = float(np.clip(q[1], y_lo, y_hi))
         out[name] = to_world(q)
 
-    def rms_of(k, mm, swap):
-        pts = mm[:, ::-1] if swap else mm
-        c, d = L[k]
-        nrm = np.array([-d[1], d[0]])
-        return float(np.sqrt(np.mean(((pts - c) @ nrm) ** 2)))
-    out["rms"] = {"sup": rms_of("sup", sup_m, False), "inf": rms_of("inf", inf_m, False),
-                  "ant": rms_of("ant", ant_m, True), "post": rms_of("post", post_m, True)}
+    def rms_of(k, mm, swap=False):
+        c = Pf[k]
+        return float(np.sqrt(np.mean((mm[:, 1] - np.polyval(c, mm[:, 0])) ** 2)))
+    out["rms"] = {"sup": rms_of("sup", sup_m), "inf": rms_of("inf", inf_m),
+                  "ant": rms_of("ant", ant_m), "post": rms_of("post", post_m)}
     return out
 
 
