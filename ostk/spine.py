@@ -219,16 +219,27 @@ def endplate_corners_anatomic(points, normal_axis=WORLD_SUPERIOR,
     if res is None:
         return None
     A, Pc, surf = np.asarray(res[0], float), np.asarray(res[1], float), res[2]
+
+    def _out(a_out, p_out):
+        if not return_rms:
+            return a_out, p_out, surf
+        # residual about the TRIMMED plate, matching what fit_endplate reports. Free --
+        # the corner fit already produced the surface and both corners.
+        mid = 0.5 * (A + Pc)
+        nn = unit(np.cross(unit(lr), unit(Pc - A)))
+        r = float(np.sqrt(np.mean(((np.asarray(surf, float) - mid) @ nn) ** 2)))
+        return a_out, p_out, surf, r
+
     u = Pc - A
     span = float(np.linalg.norm(u))
     if span <= 0:
-        return res
+        return _out(A, Pc)
     u = u / span                                     # anterior -> posterior
     lrv = unit(lr)
     ap = anterior_axis(unit(normal_axis), lr)
     denom = float(u @ ap)
     if abs(denom) < 1e-6:                            # line perpendicular to A-P: nothing to slide
-        return res
+        return _out(A, Pc)
     plate_n = unit(np.cross(u, lrv))                 # in-sagittal, perpendicular to the chord
 
     if 0.0 < lat_frac_rim < 1.0:                     # medial band
@@ -238,7 +249,7 @@ def endplate_corners_anatomic(points, normal_axis=WORLD_SUPERIOR,
     rel = P - A
     rim = P[np.abs(rel @ plate_n) <= rim_mm]         # points on the endplate RIM
     if len(rim) < 6:
-        return res
+        return _out(A, Pc)
     target = float(np.percentile(rim @ ap, ant_pct))
     t = (target - float(A @ ap)) / denom
     A_out = A + t * u if (np.isfinite(t) and t < 0.0) else A   # never pull it posteriorly
@@ -252,7 +263,7 @@ def endplate_corners_anatomic(points, normal_axis=WORLD_SUPERIOR,
         tp = (wall - float(A @ ap)) / denom
         if np.isfinite(tp) and 0.0 < tp < 3.0 * span:
             P_out = A + tp * u
-    return A_out, P_out, surf
+    return _out(A_out, P_out)
 
 
 def _canal_wall_ap(P, lrv, ap, lat_frac, close_mm: int, gap_min_mm: int,
