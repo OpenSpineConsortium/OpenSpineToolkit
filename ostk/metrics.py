@@ -39,7 +39,7 @@ def pelvic_incidence(endplate_points, femhead_left_points, femhead_right_points,
 
 def femoral_head_center(label, affine, femur_name, hip_name=None, *,
                         sup_axis=WORLD_SUPERIOR, contact_mm=6.0,
-                        slab_frac=0.30, min_voxels=50):
+                        slab_frac=0.30, min_voxels=50, labels=None):
     """Robust femoral-head CENTRE (the hip-axis endpoint for PI/PT).
 
     The femoral head is a sphere, but the femur mask also holds the neck and
@@ -54,8 +54,19 @@ def femoral_head_center(label, affine, femur_name, hip_name=None, *,
          the endplate fit uses for osteophytes.
     Falls back to a robust cranial-slab fit when the hip mask is absent/too small.
     Returns (centre, radius, rms) or None."""
-    from .labels import lid, LABELS
+    from .labels import LABELS as _OSTK_LABELS
     from .masks import binary_mask, largest_component, mask_world, surface_slab
+    # `labels` lets a caller supply the name->id map that matches ITS volume. ostk's map
+    # is not the only one in use: CTSpinoPelvic1K v4 is VerSe-native (L1=20, femurs=32/33)
+    # while ostk's is the legacy scheme (L1=1, femurs=11/12). Resolving `femur_left`
+    # against the wrong map does not error -- it silently fits a sphere to a THORACIC
+    # VERTEBRA, which is how a v4 case came back with PT -15.8 deg and the PI identity
+    # out by 31.5 deg while SS and LL looked fine.
+    LABELS = dict(labels) if labels is not None else _OSTK_LABELS
+    def lid(n):
+        return LABELS[n]
+    if femur_name not in LABELS:
+        return None
     fem = mask_world(largest_component(binary_mask(label, lid(femur_name))), affine)
     if len(fem) < min_voxels:
         return None
