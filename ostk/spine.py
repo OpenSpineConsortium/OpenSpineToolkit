@@ -158,7 +158,10 @@ def endplate_corners(points, normal_axis=WORLD_SUPERIOR, which: str = "superior"
 def endplate_corners_anatomic(points, normal_axis=WORLD_SUPERIOR,
                               which: str = "superior", lr=(1.0, 0.0, 0.0), *,
                               rim_mm: float = 6.0, ant_pct: float = 99.0,
-                              lat_frac_rim: float = 0.30, **fit_kw):
+                              lat_frac_rim: float = 0.30,
+                              lat_frac_gap: float = 0.15, close_mm: int = 2,
+                              gap_min_mm: int = 3, max_snap_mm: float = 15.0,
+                              **fit_kw):
     """`endplate_corners`' line with its ANTERIOR end run out to the cortical margin.
 
     `endplate_corners` is tuned to protect the ANGLE: `ant_skip=0.08` sets the anterior
@@ -167,12 +170,24 @@ def endplate_corners_anatomic(points, normal_axis=WORLD_SUPERIOR,
     anterior corner lands 6-14 mm inside the true anterior cortex, a quarter to a third
     of the body depth, which is plainly visible on a rendered overlay.
 
-    Only the anterior end is touched. `drop_post` was suspected too, but the A-P
-    occupancy of the medial band shows it already lands the posterior corner at the
-    spinal canal on every level, which is exactly where the posterior corner belongs:
+    `drop_post=0.42` is wrong at the other end for the same reason: it is a fixed
+    fraction of an A-P extent that INCLUDES the posterior elements, so it cuts at a
+    different anatomic place on every level and on each face of the same level. Marking
+    both faces on the medial-band occupancy shows it scattering either side of the wall
+    rather than landing on it -- into the canal on L3-inferior, L4 and L5, and 10 mm the
+    other way, buried in the body, on L1-inferior:
 
         L3  .##.#.##.##.##.#.##.##.##.##.#.##.##.#.....#.##.##.##.#.##...
-                                                 P            (canal = '.....')
+                                                 I   S      (canal = '.....')
+        L5  #.##.#.##.##.##.##.#.##.##.##.#.##............##.##.##.#...
+                                                 I S
+
+    So the posterior corner is set from the anatomy too: the posterior body wall is the
+    ANTERIOR EDGE of the canal gap in that occupancy. Single-bin holes are closed first
+    (`close_mm`) because voxel sampling aliases a solid body into '#.##.##.#', and a run
+    must reach `gap_min_mm` to count as the canal. If no such gap exists -- the sacrum,
+    where the median crest bridges to the body at the midline -- the fitted corner is
+    kept rather than guessed at.
 
     Two earlier approaches failed and are worth not repeating. Both walked the fitted
     line looking for where it left bone:
@@ -226,9 +241,68 @@ def endplate_corners_anatomic(points, normal_axis=WORLD_SUPERIOR,
         return res
     target = float(np.percentile(rim @ ap, ant_pct))
     t = (target - float(A @ ap)) / denom
-    if not np.isfinite(t) or t >= 0.0:               # never pull the corner posteriorly
-        return res
-    return (A + t * u), Pc, surf
+    A_out = A + t * u if (np.isfinite(t) and t < 0.0) else A   # never pull it posteriorly
+
+    # posterior: the anterior edge of the canal gap
+    P_out = Pc
+    wall = _canal_wall_ap(np.asarray(points, float), lrv, ap, lat_frac_gap,
+                          close_mm, gap_min_mm, near_ap=float(Pc @ ap),
+                          max_snap_mm=max_snap_mm)
+    if wall is not None:
+        tp = (wall - float(A @ ap)) / denom
+        if np.isfinite(tp) and 0.0 < tp < 3.0 * span:
+            P_out = A + tp * u
+    return A_out, P_out, surf
+
+
+def _canal_wall_ap(P, lrv, ap, lat_frac, close_mm: int, gap_min_mm: int,
+                   near_ap: float, max_snap_mm: float):
+    """A-P coordinate of the vertebral body's POSTERIOR WALL: the anterior edge of the
+    spinal-canal gap in the medial band's A-P occupancy.
+
+    The gap is chosen as the one whose anterior edge is NEAREST `near_ap` (the fitted
+    posterior corner), not the longest one. Longest-run is not robust: on L3 it picked a
+    different run as the band width changed, moving the wall 33 mm (130 / 99 / 132 / 132
+    at 15/10/6/4% width). The fitted corner is already approximately right, so this only
+    ever SNAPS it to the true wall, and refuses beyond `max_snap_mm`.
+
+    None if no run reaches `gap_min_mm` within range -- e.g. the sacrum, whose median
+    crest bridges to the body at the midline, so there is no gap to find and the caller
+    keeps its fitted corner."""
+    if 0.0 < lat_frac < 1.0:
+        lp = P @ lrv
+        lo, hi = np.quantile(lp, [(1 - lat_frac) / 2, 1 - (1 - lat_frac) / 2])
+        P = P[(lp >= lo) & (lp <= hi)]
+    if len(P) < 20:
+        return None
+    q = P @ ap
+    lo_b = int(np.floor(q.min()))
+    occ = np.zeros(int(np.ceil(q.max())) - lo_b + 1, bool)
+    occ[np.clip(np.round(q).astype(int) - lo_b, 0, len(occ) - 1)] = True
+    # close aliasing holes: voxel sampling renders a solid body as '#.##.##.#'
+    filled = occ.copy()
+    run = 0
+    for i, o in enumerate(occ):
+        if o:
+            if 0 < run <= close_mm:
+                filled[i - run:i] = True
+            run = 0
+        else:
+            run += 1
+    # each empty run is a candidate canal; its ANTERIOR edge is a candidate wall
+    best, best_d, run = None, None, 0
+    for i, o in enumerate(filled):
+        if not o:
+            run += 1
+            continue
+        if run >= gap_min_mm:
+            d = abs((i + lo_b) - near_ap)
+            if best_d is None or d < best_d:
+                best, best_d = float(i + lo_b), d
+        run = 0
+    if best is None or best_d > max_snap_mm:
+        return None
+    return best
 
 
 def corner_params_for_level(level: str) -> dict:
