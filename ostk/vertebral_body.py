@@ -243,20 +243,27 @@ def fit_plane_ransac(points, *, thresh_mm: float = 1.5, iters: int = 200,
     if len(P) < 3:
         return None
     rng = np.random.default_rng(seed)
-    best_in, best_n, best_c = None, None, None
-    for _ in range(int(iters)):
-        idx = rng.choice(len(P), size=3, replace=False)
-        a, b, c = P[idx]
-        nrm = np.cross(b - a, c - a)
-        nn = np.linalg.norm(nrm)
-        if nn < 1e-9:
-            continue
-        nrm = nrm / nn
-        d = np.abs((P - a) @ nrm)
-        inl = d <= thresh_mm
-        if best_in is None or inl.sum() > best_in.sum():
-            best_in, best_n, best_c = inl, nrm, a
-    if best_in is None or best_in.sum() < max(3, min_inlier_frac * len(P) * 0.2):
+    n_it = int(iters)
+    # VECTORISED over hypotheses. The textbook form -- a Python loop drawing 3 points and
+    # calling np.cross per iteration -- spends nearly all its time in numpy's per-call
+    # overhead on 3-vectors, not on arithmetic: it was the single hottest line in a whole
+    # case build (12k np.cross calls). Drawing every triple at once and scoring them in
+    # one broadcast is the identical estimator, just without the interpreter in the loop.
+    idx = rng.integers(0, len(P), size=(n_it, 3))
+    A, B, Cc = P[idx[:, 0]], P[idx[:, 1]], P[idx[:, 2]]
+    nrm = np.cross(B - A, Cc - A)                      # (n_it, 3)
+    ln = np.linalg.norm(nrm, axis=1)
+    ok = ln > 1e-9
+    if not ok.any():
+        return None
+    nrm = nrm[ok] / ln[ok, None]
+    A = A[ok]
+    # |(p - a) . n| for every point x every hypothesis  -> (n_pts, n_hyp)
+    d = np.abs(P @ nrm.T - np.einsum("ij,ij->i", A, nrm)[None, :])
+    inl = d <= thresh_mm
+    best_i = int(np.argmax(inl.sum(axis=0)))
+    best_in = inl[:, best_i]
+    if best_in.sum() < max(3, min_inlier_frac * len(P) * 0.2):
         return None
     # refit on the consensus set by total least squares
     Q = P[best_in]
