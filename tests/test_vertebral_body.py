@@ -36,3 +36,39 @@ def test_ransac_is_deterministic():
     a = fit_plane_ransac(P, thresh_mm=1.5)
     b = fit_plane_ransac(P, thresh_mm=1.5)
     assert np.allclose(a[1], b[1]) and np.allclose(a[0], b[0])
+
+
+def _plate_with_pathology(seed=0):
+    """A gently biconcave endplate carrying an osteophyte lip and a Schmorl's divot."""
+    rng = np.random.default_rng(seed)
+    x = np.linspace(-18, 18, 120)
+    z = 0.004 * x ** 2 + 0.05 * x + rng.normal(0, 0.15, len(x))
+    z[:6] -= 9.0            # anterior spur diving away from the plate
+    z[60:66] -= 4.0         # Schmorl's node divot mid-plate
+    return x, z
+
+
+def test_profile_model_ignores_osteophyte_and_schmorl_node():
+    from ostk.vertebral_body import fit_profile_robust
+    x, z = _plate_with_pathology()
+    coef, w = fit_profile_robust(x, z, degree=2)
+    assert abs(coef[0] - 0.004) < 0.002        # curvature recovered
+    assert abs(coef[1] - 0.05) < 0.02          # slope recovered
+    assert (w[:6] == 0).all()                  # spur carries zero weight
+    assert (w[60:66] == 0).all()               # divot carries zero weight
+    assert (w[10:55] > 0).all()                # the clean plate is fully retained
+
+
+def test_profile_model_degree_two_cannot_absorb_pathology():
+    """Degree matters: a higher-order model would fit the divot and defeat the point."""
+    from ostk.vertebral_body import fit_profile_robust
+    x, z = _plate_with_pathology()
+    _, w2 = fit_profile_robust(x, z, degree=2)
+    _, w8 = fit_profile_robust(x, z, degree=8)
+    assert (w2[60:66] == 0).all()
+    assert (w8[60:66] > 0).sum() >= (w2[60:66] > 0).sum()
+
+
+def test_profile_model_needs_enough_points():
+    from ostk.vertebral_body import fit_profile_robust
+    assert fit_profile_robust(np.arange(3.0), np.arange(3.0), degree=2) is None

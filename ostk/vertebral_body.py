@@ -303,7 +303,8 @@ def endplate_corners_body(mask, affine, which: str = "superior", *,
                           sup_axis=WORLD_SUPERIOR, lr=(1.0, 0.0, 0.0),
                           core_mm: float = 4.0, ransac_mm: float = 1.5,
                           lat_frac: float = 0.45, min_points: int = 30,
-                          canal_from=None, body=None, edge_trim_frac: float = 0.12):
+                          canal_from=None, body=None, edge_trim_frac: float = 0.12,
+                          plate_band_mm: float = 8.0, profile_degree: int = 2):
     """Endplate corners of ONE vertebra, from its whole-vertebra mask.
 
     body_mask -> medial band -> endplate surface -> RANSAC plane -> A-P extremes of the
@@ -378,13 +379,34 @@ def endplate_corners_body(mask, affine, which: str = "superior", *,
     # at -16.6 deg against +20.1 for its own inferior, with rms a healthy 0.74 -- which is
     # why a residual threshold cannot catch this. rms measures how well the points fit the
     # plane that was chosen, not whether the right points were chosen.
-    t_all = surf @ ap
-    span_ap = float(np.ptp(t_all))
-    lo_e = float(np.min(t_all)) + edge_trim_frac * span_ap
-    hi_e = float(np.max(t_all)) - edge_trim_frac * span_ap
-    core = surf[(t_all >= lo_e) & (t_all <= hi_e)]
+    # Keep only surface points NEAR THE PLATE. Past the plate's edge the topmost voxel
+    # in a column belongs to the cortical wall, and a mid-body anterior bulge or spur
+    # creates columns whose topmost voxel is far below the plate entirely. Measured on
+    # 0003, the superior surface carried points 21-26 mm off its own rim plane while the
+    # inferior sat at 0.6-1.2 mm -- a real endplate concavity is 1-3 mm, so those were
+    # wall, not plate. That contamination tilts the tangent, and because each corner is
+    # the tangent x wall intersection, a tilted tangent SLIDES THE CORNER ALONG THE WALL:
+    # the superior posterior corner ends up too far anterior.
+    #
+    # A fixed A-P fraction (the previous edge_trim_frac) cannot express this -- how far
+    # in the contamination reaches depends on the bulge, not on a share of the width.
+    # Distance from the plate does, and it is what "endplate" means.
+    # Distance PERPENDICULAR TO THE PLATE, from the initial robust plane -- not vertical
+    # distance from the highest voxel. An endplate is tilted (18 deg is ordinary), and
+    # over a 44 mm body that is a 14 mm drop, so a vertical band anchored on the maximum
+    # keeps only the sliver near the plate's high end: on 0003 L1 it retained 6.3 mm of a
+    # 43.8 mm body, and the tangent was then fitted to that fragment. Perpendicular
+    # distance is tilt-invariant, which is what "near the plate" has to mean.
+    near_plate = np.abs((surf - c) @ n) <= plate_band_mm
+    core = surf[near_plate]
+    if len(core) < 8:                        # fall back to the old A-P trim
+        t_all0 = surf @ ap
+        span0 = float(np.ptp(t_all0))
+        core = surf[(t_all0 >= float(np.min(t_all0)) + edge_trim_frac * span0)
+                    & (t_all0 <= float(np.max(t_all0)) - edge_trim_frac * span0)]
     if len(core) < 8:
         core = surf
+    t_all = surf @ ap
     t_core = core @ ap
     lo_t, hi_t = np.quantile(t_core, [0.25, 0.75])
     rim = core[(t_core <= lo_t) | (t_core >= hi_t)]
@@ -396,6 +418,45 @@ def endplate_corners_body(mask, affine, which: str = "superior", *,
     if len(on_plate) < 4:
         on_plate = keep
     rms = float(np.sqrt(np.mean(((on_plate - c) @ n) ** 2)))
+
+    # SHAPE MODEL over the near-plate surface. A robust quadratic profile admits exactly
+    # one concavity -- the normal biconcave plate -- and cannot represent an osteophyte
+    # lip or a Schmorl's node, so Tukey's biweight drives both to zero influence and the
+    # tangent stops depending on which voxel happens to be extreme. Unlike the RANSAC
+    # plane this keeps every inlier, weighted, instead of committing to one consensus set
+    # (which is how a wall-contaminated subset could be fitted confidently, with a small
+    # residual, and still be wrong). See fit_profile_robust for the references.
+    prof = fit_profile_robust(core @ ap, core @ a_ax, degree=profile_degree)
+    if prof is not None:
+        pc, pw = prof
+        if int((pw > 0).sum()) >= 8:
+            xs = (core @ ap)[pw > 0]
+            zs = np.vander(xs, profile_degree + 1) @ pc
+            # re-anchor the plate on the MODEL: centroid and tangent from the fitted
+            # profile rather than from the raw point set
+            lr_med = core.mean(axis=0)
+            lr_med = lr_med - (lr_med @ ap) * ap - (lr_med @ a_ax) * a_ax
+            xa, xb = float(xs.min()), float(xs.max())
+            za = float(np.vander([xa], profile_degree + 1) @ pc)
+            zb = float(np.vander([xb], profile_degree + 1) @ pc)
+            pa = lr_med + xa * ap + za * a_ax
+            pb = lr_med + xb * ap + zb * a_ax
+            u_prof = pb - pa
+            if np.linalg.norm(u_prof) > 1e-6:
+                c = 0.5 * (pa + pb)
+                n = unit(np.cross(unit(np.cross(u_prof, lrv)), lrv))                     if np.linalg.norm(np.cross(u_prof, lrv)) > 1e-9 else n
+                n = unit(np.cross(unit(lr), unit(u_prof)))
+                resid = zs - (core @ a_ax)[pw > 0]
+                rms = float(np.sqrt(np.mean(resid ** 2)))
+                # RE-SELECT the on-plate points against the NEW plane. Leaving them from
+                # the previous fit left the corner search anchored on one plane while
+                # measuring distances against another, and the bounded wall intersection
+                # then clamped to a baseline that no longer meant anything: 0003 L1
+                # superior came out 21 mm short posteriorly and L2 10.2 mm.
+                d_new = np.abs((surf - c) @ n)
+                sel_new = d_new <= max(ransac_mm, 1.5)
+                if int(sel_new.sum()) >= 8:
+                    on_plate = surf[sel_new]
 
     # cortical walls, from the body's own A-P margins per height bin
     hgt = pts @ a_ax
@@ -632,3 +693,95 @@ def body_quad_corners(mask, affine, *, sup_axis=WORLD_SUPERIOR, lr=(1.0, 0.0, 0.
     out["rms"] = {"sup": rms_of("sup", sup_m, False), "inf": rms_of("inf", inf_m, False),
                   "ant": rms_of("ant", ant_m, True), "post": rms_of("post", post_m, True)}
     return out
+
+
+# ---------------------------------------------------------------------------
+# Robust parametric endplate profile (shape model)
+# ---------------------------------------------------------------------------
+
+def fit_profile_robust(x, z, *, degree: int = 2, tukey_c: float = 4.685,
+                       max_iter: int = 12, min_points: int = 8):
+    """Robust low-order polynomial z(x) by IRLS with Tukey's biweight.
+
+    A SHAPE MODEL for the endplate profile, in the spirit of the parametric vertebral
+    body models used to make morphometry robust to pathology:
+      Stern D, Likar B, Pernus F, Vrtovec T. "Parametric modelling and segmentation of
+        vertebral bodies in 3D CT and MR spine images." Phys Med Biol 2011;56(23):7505-22.
+      Roberts M, Cootes TF, Adams JE. "Vertebral morphometry: semiautomatic determination
+        of detailed shape from DXA images using active appearance models."
+        Invest Radiol 2006;41(12):849-859.
+      de Bruijne M, Lund MT, Tanko LB, Pettersen PC, Nielsen M. "Quantitative vertebral
+        morphometry using neighbor-conditional shape models."
+        Med Image Anal 2007;11(5):503-512.
+
+    Why a model rather than the voxels: degree 2 admits exactly ONE concavity, which is
+    the normal biconcave endplate (Hurxthal's middle height, Am J Roentgenol 1968, exists
+    for that reason). It cannot represent a localised spur or a Schmorl's node divot, so
+    both show up as large residuals and Tukey's biweight gives them zero weight -- they
+    are excluded because they do not fit the anatomy, not because a threshold was tuned
+    to them. Raising `degree` would let the model absorb the pathology and defeat this.
+
+    Unlike RANSAC this keeps ALL of the plate: every inlier contributes, weighted. RANSAC
+    picks one consensus set and discards the rest, which is why it could lock confidently
+    onto a wall-contaminated subset and still report a small residual.
+
+    Returns (coeffs_highest_first, weights) or None.
+    """
+    x = np.asarray(x, float)
+    z = np.asarray(z, float)
+    if len(x) < max(min_points, degree + 1):
+        return None
+    V = np.vander(x, degree + 1)
+    w = np.ones(len(x))
+    coef = None
+    for _ in range(int(max_iter)):
+        W = np.sqrt(w)[:, None]
+        try:
+            coef, *_ = np.linalg.lstsq(V * W, z * np.sqrt(w), rcond=None)
+        except np.linalg.LinAlgError:
+            return None
+        r = z - V @ coef
+        s = 1.4826 * np.median(np.abs(r - np.median(r))) + 1e-9   # robust sigma (MAD)
+        u = r / (tukey_c * s)
+        w_new = np.where(np.abs(u) < 1.0, (1.0 - u ** 2) ** 2, 0.0)
+        if np.allclose(w_new, w, atol=1e-3):
+            w = w_new
+            break
+        w = w_new
+        if w.sum() < max(min_points, degree + 1):
+            return None
+    return (coef, w) if coef is not None else None
+
+
+def endplate_chord_from_profile(surf, ap, sup_axis, x_ant, x_post, *, degree: int = 2):
+    """The clinical endplate CHORD, taken from a robust profile model.
+
+    The plate is modelled as z(x) over the A-P coordinate and the chord is drawn between
+    the model's values at the anterior and posterior wall positions -- the corner-to-
+    corner tangent a reader draws, but with the endpoints coming from a fitted shape
+    rather than from whichever voxel happens to be extreme. An osteophyte at the rim or a
+    Schmorl's node mid-plate therefore cannot tilt the line.
+
+    Returns (anterior_point, posterior_point, rms_of_inliers, n_inliers) or None.
+    """
+    S = np.asarray(surf, float)
+    a_ax = unit(sup_axis)
+    apv = unit(ap)
+    x = S @ apv
+    z = S @ a_ax
+    fit = fit_profile_robust(x, z, degree=degree)
+    if fit is None:
+        return None
+    coef, w = fit
+    inl = w > 0.0
+    if int(inl.sum()) < 8:
+        return None
+    resid = z[inl] - np.vander(x[inl], degree + 1) @ coef
+    rms = float(np.sqrt(np.mean(resid ** 2)))
+    # in-plane component perpendicular to both ap and the plate's L-R spread
+    def _pt(xv):
+        zv = float(np.vander([float(xv)], degree + 1) @ coef)
+        # rebuild in world: keep the surface's median L-R, move along ap and sup
+        lr_med = S.mean(axis=0) - (S.mean(axis=0) @ apv) * apv - (S.mean(axis=0) @ a_ax) * a_ax
+        return lr_med + float(xv) * apv + zv * a_ax
+    return _pt(x_ant), _pt(x_post), rms, int(inl.sum())
