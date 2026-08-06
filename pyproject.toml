@@ -1,0 +1,53 @@
+# OpenSpineToolkit — packaging.
+#
+# The repo was importable but not INSTALLABLE: it carried no setup.py and no
+# pyproject.toml, so `pip install git+https://.../OpenSpineToolkit.git@<ref>`
+# failed at every ref with "does not appear to be a Python project". It worked
+# locally only because the checkout happened to sit on sys.path. Anything that
+# consumed ostk as a dependency -- the XRSpinoPelvic1K container is the first --
+# could not install it at all.
+#
+# Package discovery is EXPLICIT below. setuptools' automatic discovery would
+# also sweep up `projects/`, `tools/` and `tests/`, which are a research
+# scratch area, developer scripts and the test suite -- not library code, and
+# `tests` in particular would collide on import with any other installed
+# package of that name.
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openspinetoolkit"
+version = "0.1.0"
+description = "Spinopelvic parameters and vertebral geometry from segmented CT"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Gregory Schwing", email = "gregory.schwing@wayne.edu" }]
+keywords = ["spine", "spinopelvic", "pelvic-incidence", "medical-imaging", "CT"]
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+
+# From requirements.txt, minus pytest -- that is a test dependency, and shipping
+# it as a runtime one installs a test runner into every consumer's environment.
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "nibabel>=5",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+ostk = "ostk.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Gregory-Schwing-MD-PhD/OpenSpineToolkit"
+
+[tool.setuptools]
+packages = ["ostk"]
