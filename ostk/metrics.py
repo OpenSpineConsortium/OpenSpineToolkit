@@ -126,9 +126,31 @@ def _pi_from_plane(m, n, ep_rms, cL, cR, sup_axis=WORLD_SUPERIOR,
     if n_s @ sup_s < 0:                                # orient endplate normal cranially
         n_s = -n_s
 
+    # PELVIC TILT IS SIGNED, AND THAT SIGN IS NOT COSMETIC. A negative pelvic tilt is an
+    # anteverted pelvis, and the SRS-Schwab PT modifier is defined on the signed value.
+    #
+    # Taken as three unsigned angles these satisfy PI = SS + PT only when the radius lies
+    # angularly between the plate normal and the vertical. Where the pelvis is anteverted
+    # it does not, an unsigned PT returns the magnitude with the sign discarded, and the
+    # arithmetic reads PI = |SS - PT|. On the released cohort that was 79 of 300 cases --
+    # every one the same arrangement, not one a real geometric failure, and every one of
+    # them reporting a positive tilt where the anatomy is negative.
+    #
+    # PI and SS keep their own geometry, which is definitional and unambiguous: PI is the
+    # angle between the plate normal and the radius, SS the angle between that normal and
+    # the vertical. PT is then SIGNED BY CONSTRUCTION as PI - SS.
     PI = angle_between(n_s, radius)
     SS = angle_between(n_s, sup_s)
-    PT = angle_between(radius, sup_s)
+    PT = PI - SS
+
+    # ...which would make the identity vacuous, so the check moves to where it still has
+    # content: PT's MAGNITUDE is also measured independently, from the angle between the
+    # radius and the vertical, and the two must agree. That is a genuine comparison of two
+    # separately-derived quantities, and it is what the identity was actually testing all
+    # along for the cases where the sign convention happened to line up.
+    pt_independent = angle_between(radius, sup_s)
+    pt_residual = abs(abs(PT) - pt_independent)
+
     return {
         "PI": PI, "SS": SS, "PT": PT,
         "landmarks_world_mm": {
@@ -137,6 +159,7 @@ def _pi_from_plane(m, n, ep_rms, cL, cR, sup_axis=WORLD_SUPERIOR,
             "femhead_left": cL.tolist(), "femhead_right": cR.tolist(),
             "bicoxofemoral": bicox.tolist()},
         "fit_residuals": {
+            "pelvic_tilt_magnitude_residual_deg": pt_residual,
             "s1_endplate_rms": ep_rms,
             "femhead_left_rms": eL, "femhead_right_rms": eR,
             "femhead_left_radius": rL, "femhead_right_radius": rR},
@@ -261,8 +284,12 @@ def _pi_from_label_core(label, affine, sup_axis, endplate_frac, head_frac,
     else:
         flags.append(f"pi_anchor_failed:{pi_anchor}")        # keep the plane centroid
     r = _pi_from_plane(m, n, ep_rms, cL, cR, sup_axis, rL=rL, rR=rR, eL=eL, eR=eR)
-    if abs(r["SS"] + r["PT"] - r["PI"]) > 1.0:         # geometric identity check
-        flags.append("identity_violation")
+    # The check that still has content: PT's magnitude, derived as PI - SS, against the
+    # same magnitude measured independently from the radius and the vertical. The old
+    # PI = SS + PT test is now true by construction and would flag nothing.
+    _res = r["fit_residuals"].get("pelvic_tilt_magnitude_residual_deg")
+    if _res is not None and _res > 1.0:
+        flags.append(f"pelvic_tilt_disagreement:{_res:.1f}deg")
     flags += _plausibility_flags(r, cL, cR)
     return r, (flags or ["ok"])
 
