@@ -170,3 +170,15 @@ def test_cli_csv_columns_are_the_union_not_the_first_row(tmp_path):
     assert rows[0]["T12_VBHp"] == ""
     assert rows[1]["T12_VBHp"] == "22.0"
     assert rows[0]["qc_flags"] == "ok"
+
+
+def test_pedicle_is_opt_in():
+    """An unvalidated measure must not arrive by default beside validated ones."""
+    from ostk.morphometry import level_morphometry
+    lab, aff = _phantom_volume()
+    r = level_morphometry(lab, aff, 22, max_plate_rms_mm=10.0)
+    assert r is not None
+    assert not [k for k in r if k.startswith(("PDW", "PDH"))], (
+        "pedicle keys must be absent unless pedicle=True")
+    r2 = level_morphometry(lab, aff, 22, max_plate_rms_mm=10.0, pedicle=True)
+    assert r2 is not None

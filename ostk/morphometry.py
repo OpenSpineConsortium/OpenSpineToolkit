@@ -159,70 +159,145 @@ def canal_dimensions(mask, affine, frame, *, sup_axis=WORLD_SUPERIOR,
     return {"SCW": _span(pts, frame["lat"]), "SCD": _span(pts, frame["ap"])}
 
 
-def pedicle_widths(mask, body, affine, frame, *, min_vox: int = 40) -> Dict[str, float]:
-    """PDW for each side, measured ACROSS THE PEDICLE'S OWN AXIS.
+def pedicle_widths(mask, body, affine, frame, *, min_vox: int = 40,
+                   sup_axis=WORLD_SUPERIOR) -> Dict[str, float]:
+    """PDW and PDH for each side, at the isthmus, across the pedicle's OWN axis.
 
-    The pedicle is a short oblique strut, and lumbar obliquity runs from roughly 10
-    degrees at L1 to 30 at L5. A width taken straight across the patient therefore cuts
-    it on the diagonal and reads wide, and reads progressively wider the further caudal
-    it goes -- a bias with the shape of an anatomical trend.
+    NOT VALIDATED -- opt in with `pedicle=True` and check it before believing it. Against
+    Panjabi 1992 this reads roughly half at L5 (about 10 mm against 18.6) while the four
+    other dimensions in this module land within about 1.5 mm at every level. Two earlier
+    versions failed in opposite directions, which is the signal that the isolation, not
+    the measurement, is what is wrong: the pedicle is a short oblique strut continuous
+    with the body at one end and the lamina at the other, and separating it from both by
+    a rule on the canal's extent is evidently not enough. The dimensions themselves are
+    taken correctly once a region is given; the region is the open problem.
 
-    So: take everything that is neither body nor canal, split it at the midline, keep
-    each side's largest component, measure its long axis, and take the width in the plane
-    across that axis. The isthmus is the WAIST of the strut, so the reported width is a
-    low percentile of the per-section widths rather than the extent of the whole strut,
-    which would be measured where it flares into the body.
+    THE PEDICLE HAS TO BE ISOLATED FIRST, and this is where a first version of this
+    function went wrong. Taking "everything that is not body" and splitting it at the
+    midline hands each side the lamina, the articular processes and the transverse
+    process as well, all of which are larger than the pedicle at the upper lumbar
+    levels. The principal axis then follows that bulk rather than the strut, and the
+    measured waist belongs to the wrong structure: it read 17.0 mm at L1 against a
+    published 8.6, and was near-correct at L5 only because an L5 pedicle is big enough
+    to dominate its own neighbourhood.
+
+    So the pedicle is localised the way it is defined -- the bridge running lateral to
+    the canal, between the body behind it and the lamina behind that. Sections are
+    restricted to those where the arch actually encloses a canal, and within them to the
+    anterior part of the canal's anteroposterior span, which is where the pedicle
+    attaches. That region's own long axis is then measured from its points, and the
+    dimensions are taken in the plane across it: the ISTHMUS is a waist, so each is a low
+    percentile over the sections rather than an extent of the whole strut, which would be
+    measured where it flares into the body.
+
+    PDW is the dimension closer to the frame's lateral axis and PDH the one closer to
+    its superior axis, rather than the smaller and larger of the two: at a level where
+    the two are close, sorting by size silently swaps their names.
     """
     m = np.asarray(mask, bool)
     b = np.asarray(body, bool) if body is not None else np.zeros_like(m)
+    canal = canal_mask(m, affine, sup_axis=sup_axis)
+    if canal is None or not canal.any():
+        return {}
     arch = m & ~b
     if arch.sum() < 2 * min_vox:
         return {}
-    pts_all = _world(arch, affine)
+
+    ax = int(np.argmax(np.abs(np.asarray(affine, float)[:3, :3].T @ unit(sup_axis))))
+    # WHICH END OF THE CANAL IS ANTERIOR IS NOT AN ASSUMPTION. The pedicle attaches at the
+    # end of the canal that faces the body, and which array direction that is depends on
+    # the affine. Taking the wrong end measures the lamina instead: it read a flat 7 mm at
+    # every level, with none of the caudal widening a pedicle actually has.
+    bc = _world(b, affine).mean(axis=0) if b.any() else None
+    cc = _world(canal, affine).mean(axis=0)
+    apv = frame["ap"] if bc is None else unit(bc - cc)
+    # +1 if increasing array index along the in-plane A-P axis moves anteriorly
+    inplane = [i for i in range(3) if i != ax]
+    A = np.asarray(affine, float)[:3, :3]
+    ap_axis_idx = int(np.argmax([abs(A[:, i] @ apv) for i in inplane]))
+    ap_arr = inplane[ap_axis_idx]
+    ap_sign = 1 if (A[:, ap_arr] @ apv) > 0 else -1
+    # position of that array axis within the moved (sup-first) view
+    ap_moved = 0 if ap_arr < ax else 1        # after moveaxis(ax, 0), axes are [ax, rest...]
+    ap_moved = [i for i in range(3) if i != ax].index(ap_arr)
+    keep = np.zeros_like(arch)
+    moved_a, moved_c, moved_k = (np.moveaxis(x, ax, 0) for x in (arch, canal, keep))
+    for k in range(moved_a.shape[0]):
+        ca = moved_c[k]
+        if ca.sum() < 12:
+            continue
+        # in this 2-D section, axis `ap_moved` is anteroposterior and the other is lateral
+        lat_moved = 1 - ap_moved
+        ys = np.nonzero(ca.any(axis=lat_moved))[0]      # extent along A-P
+        xs = np.nonzero(ca.any(axis=ap_moved))[0]       # extent along lateral
+        if len(ys) < 3 or len(xs) < 3:
+            continue
+        span = ys.max() - ys.min()
+        if ap_sign > 0:                                  # anterior is the HIGH index end
+            lo_ap, hi_ap = ys.min() + int(0.45 * span), ys.max()
+        else:                                            # anterior is the LOW index end
+            lo_ap, hi_ap = ys.min(), ys.min() + int(0.55 * span)
+        band = np.zeros_like(ca)
+        lat = np.zeros_like(ca)
+        if ap_moved == 1:
+            band[:, lo_ap:hi_ap + 1] = True
+            lat[:xs.min(), :] = True
+            lat[xs.max() + 1:, :] = True
+        else:
+            band[lo_ap:hi_ap + 1, :] = True
+            lat[:, :xs.min()] = True
+            lat[:, xs.max() + 1:] = True
+        moved_k[k] = moved_a[k] & band & lat
+    keep = np.moveaxis(moved_k, 0, ax)
+    if keep.sum() < 2 * min_vox:
+        return {}
+
+    pts_all = _world(keep, affine)
     if not len(pts_all):
         return {}
-    lat = frame["lat"]
-    t = pts_all @ lat
-    mid = float(np.median(_world(m, affine) @ lat))
+    latv, supv = frame["lat"], frame["sup"]
+    mid = float(np.median(_world(m, affine) @ latv))
+    t = pts_all @ latv
     out: Dict[str, float] = {}
     for side, sel in (("r", t > mid), ("l", t < mid)):
         pts = pts_all[sel]
         if len(pts) < min_vox:
             continue
-        # the strut's own long axis, from the side's point cloud.
-        # principal_axes returns (axes_3x3, eigenvalues, centroid) with the long axis in
-        # COLUMN 0 -- not three vectors. Unpacking it as three vectors makes `axis` a
-        # 3x3 matrix, which then multiplies cleanly against an (N,3) cloud and fails
-        # several lines later with a shape error that names neither.
         try:
             axes, _, _ = principal_axes(pts)
         except Exception:
             continue
         axis = unit(np.asarray(axes)[:, 0])
-        # two directions across it, both perpendicular to the long axis
-        u = frame["lat"] - (frame["lat"] @ axis) * axis
+        # the two directions across the strut
+        u = latv - (latv @ axis) * axis
         if np.linalg.norm(u) < 1e-6:
             continue
         u = unit(u)
         v = unit(np.cross(axis, u))
-        s = pts @ axis
-        lo, hi = np.quantile(s, [0.15, 0.85])          # ignore both flares
-        widths = []
+        # name them by which frame axis each is closer to, not by which is smaller
+        w_dir, h_dir = (u, v) if abs(u @ latv) >= abs(v @ latv) else (v, u)
+        sarr = pts @ axis
+        lo, hi = np.quantile(sarr, [0.15, 0.85])
+        ws, hs = [], []
         for c in np.linspace(lo, hi, 9):
-            sec = pts[np.abs(s - c) <= 1.0]
+            sec = pts[np.abs(sarr - c) <= 1.0]
             if len(sec) < 8:
                 continue
-            widths.append(min(_span(sec, u), _span(sec, v)))
-        if widths:
-            out[f"PDW_{side}"] = float(np.percentile(widths, 20))
-    if "PDW_l" in out and "PDW_r" in out:
-        out["PDW"] = 0.5 * (out["PDW_l"] + out["PDW_r"])
+            ws.append(_span(sec, w_dir))
+            hs.append(_span(sec, h_dir))
+        if ws:
+            out[f"PDW_{side}"] = float(np.percentile(ws, 20))
+            out[f"PDH_{side}"] = float(np.percentile(hs, 20))
+    for k in ("PDW", "PDH"):
+        a, bb = out.get(f"{k}_l"), out.get(f"{k}_r")
+        if a is not None and bb is not None:
+            out[k] = 0.5 * (a + bb)
     return out
 
 
 def level_morphometry(label, affine, level_id: int, *, sup_axis=WORLD_SUPERIOR,
-                      lr=(1.0, 0.0, 0.0), max_plate_rms_mm: float = 2.0
-                      ) -> Optional[Dict[str, float]]:
+                      lr=(1.0, 0.0, 0.0), max_plate_rms_mm: float = 2.0,
+                      pedicle: bool = False) -> Optional[Dict[str, float]]:
     """Every dimension above for ONE vertebra, or None if its plates did not fit.
 
     The plate fit's own residual is the gate. A level whose end-plate did not converge
@@ -250,6 +325,11 @@ def level_morphometry(label, affine, level_id: int, *, sup_axis=WORLD_SUPERIOR,
         for k, v in endplate_dimensions(body, affine, corners, frame).items():
             out[f"{k}{tag}"] = v
     out.update(canal_dimensions(m, affine, frame, sup_axis=sup_axis, lr=lr))
-    out.update(pedicle_widths(m, body, affine, frame))
+    # PEDICLE IS OFF BY DEFAULT AND THE REASON IS IN pedicle_widths' docstring: it is not
+    # validated. Every other dimension here lands within about 1.5 mm of the published
+    # cadaveric series across levels; this one does not, and shipping a number that cannot
+    # be checked next to four that can would borrow their credibility.
+    if pedicle:
+        out.update(pedicle_widths(m, body, affine, frame, sup_axis=sup_axis))
     out["plate_rms_mm"] = max(float(sup[2]), float(inf[2]))
     return {k: (round(v, 2) if isinstance(v, float) else v) for k, v in out.items()}
