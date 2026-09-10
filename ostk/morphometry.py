@@ -46,7 +46,7 @@ from typing import Dict, Optional
 
 import numpy as np
 
-from .geometry import WORLD_SUPERIOR, principal_axes, unit
+from .geometry import WORLD_SUPERIOR, principal_axes, unit  # principal_axes -> (axes3x3, w, mean)
 from .masks import binary_mask, largest_component
 from .vertebral_body import body_mask, canal_mask, endplate_corners_body
 
@@ -189,12 +189,16 @@ def pedicle_widths(mask, body, affine, frame, *, min_vox: int = 40) -> Dict[str,
         pts = pts_all[sel]
         if len(pts) < min_vox:
             continue
-        # the strut's own long axis, from the side's point cloud
+        # the strut's own long axis, from the side's point cloud.
+        # principal_axes returns (axes_3x3, eigenvalues, centroid) with the long axis in
+        # COLUMN 0 -- not three vectors. Unpacking it as three vectors makes `axis` a
+        # 3x3 matrix, which then multiplies cleanly against an (N,3) cloud and fails
+        # several lines later with a shape error that names neither.
         try:
-            e1, _, _ = principal_axes(pts)
+            axes, _, _ = principal_axes(pts)
         except Exception:
             continue
-        axis = unit(e1)
+        axis = unit(np.asarray(axes)[:, 0])
         # two directions across it, both perpendicular to the long axis
         u = frame["lat"] - (frame["lat"] @ axis) * axis
         if np.linalg.norm(u) < 1e-6:

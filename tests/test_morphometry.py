@@ -102,3 +102,50 @@ def test_degenerate_plates_return_none():
     """Two plates that give no anteroposterior direction must drop the level."""
     pt = np.zeros(3)
     assert vertebra_frame((pt, pt), (pt, pt)) is None
+
+
+def _phantom_volume(spacing=(0.8, 0.8, 0.8), shape=(96, 96, 72)):
+    """A crude vertebra in voxels: a solid body, a ring arch behind it, two pedicles.
+
+    Not anatomically pretty. Its only job is to exercise every branch of
+    level_morphometry on real arrays, which is what no unit test on corner points can
+    do -- the bug this catches was principal_axes being unpacked as three vectors when
+    it returns a 3x3 matrix, and it failed several lines downstream with a shape error
+    that named neither function.
+    """
+    lab = np.zeros(shape, np.uint8)
+    cx, cy, cz = shape[0] // 2, shape[1] // 2, shape[2] // 2
+    # body: 40 mm wide, 32 mm deep, 26 mm tall, anterior of centre (+y)
+    hx, hy, hz = int(20 / spacing[0]), int(16 / spacing[1]), int(13 / spacing[2])
+    lab[cx - hx:cx + hx, cy: cy + 2 * hy, cz - hz:cz + hz] = 22
+    # arch: a closed ring posterior of the body, so canal_mask finds a hole
+    ax0, ax1 = cx - int(16 / spacing[0]), cx + int(16 / spacing[0])
+    ay0, ay1 = cy - int(22 / spacing[1]), cy
+    az0, az1 = cz - int(7 / spacing[2]), cz + int(7 / spacing[2])
+    lab[ax0:ax1, ay0:ay1, az0:az1] = 22
+    lab[ax0 + 4:ax1 - 4, ay0 + 4:ay1 - 2, az0:az1] = 0        # the canal
+    aff = np.diag([spacing[0], spacing[1], spacing[2], 1.0])
+    return lab, aff
+
+
+def test_level_morphometry_runs_on_voxels():
+    from ostk.morphometry import level_morphometry
+    lab, aff = _phantom_volume()
+    r = level_morphometry(lab, aff, 22, max_plate_rms_mm=10.0)
+    assert r is not None, "the phantom should measure; a None here hides a shape bug"
+    for k in ("VBHa", "VBHp"):
+        assert k in r and 5.0 < r[k] < 80.0, f"{k} implausible: {r.get(k)}"
+
+
+def test_pedicle_uses_the_long_axis_not_the_axis_matrix():
+    """principal_axes returns (axes3x3, eigenvalues, mean); column 0 is the long axis."""
+    from ostk.geometry import principal_axes
+    rng = np.random.default_rng(0)
+    pts = rng.normal(scale=[10.0, 2.0, 1.0], size=(500, 3))
+    axes, w, mean = principal_axes(pts)
+    assert np.asarray(axes).shape == (3, 3)
+    assert np.asarray(w).shape == (3,) and w[0] >= w[1] >= w[2]
+    assert np.asarray(mean).shape == (3,)
+    long_axis = np.asarray(axes)[:, 0]
+    assert long_axis.shape == (3,)
+    assert abs(long_axis @ np.array([1.0, 0.0, 0.0])) > 0.9
