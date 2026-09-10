@@ -49,6 +49,43 @@ def _label_files(labels_dir: str) -> List[str]:
 
 # --- top-level workers (picklable for ProcessPoolExecutor) ------------------
 
+# Levels the morphometry command reports. T12 and L6 are included because the borders are
+# what this toolkit is for; a level absent from a mask is simply skipped.
+_MORPH_LEVELS = {19: "T12", 20: "L1", 21: "L2", 22: "L3", 23: "L4", 24: "L5", 25: "L6"}
+
+
+def _run_morph(path: str) -> dict:
+    """Per-level dimensions for one case, flattened to <LEVEL>_<DIM>.
+
+    One record per case, like every other command here, rather than one per level: the
+    CLI's contract is a row per case and a caller who wants long form can melt it.
+    """
+    import numpy as np
+    from .io import load_label
+    from .morphometry import level_morphometry
+    lab, aff = load_label(path)
+    rec = {"case_id": _case_id(path)}
+    present = set(np.unique(lab).tolist())
+    done, dropped = 0, 0
+    for vid, name in _MORPH_LEVELS.items():
+        if vid not in present:
+            continue
+        try:
+            r = level_morphometry(lab, aff, vid)
+        except Exception:
+            r = None
+        if r is None:
+            dropped += 1
+            continue
+        done += 1
+        for k, v in r.items():
+            rec[f"{name}_{k}"] = v
+    rec["qc_flags"] = ["ok"] if done else ["no_level_measured"]
+    rec["levels_measured"] = done
+    rec["levels_dropped"] = dropped
+    return rec
+
+
 def _run_pi(path: str) -> dict:
     from .io import load_label
     from . import metrics
@@ -77,13 +114,20 @@ def _run_all(path: str) -> dict:
     return metrics.spinopelvic_summary_from_label(lab, aff, case_id=_case_id(path))
 
 
-_WORKERS = {"pi": _run_pi, "ll": _run_ll, "cobb": _run_cobb, "all": _run_all}
+_WORKERS = {"pi": _run_pi, "ll": _run_ll, "cobb": _run_cobb, "all": _run_all,
+            "morph": _run_morph}
 
 
 # --- flattening for CSV -----------------------------------------------------
 
 def _flatten(rec: dict, cmd: str) -> dict:
     """One flat row per case for the aggregate CSV (full detail stays in JSONL)."""
+    if cmd == "morph":
+        # already one flat row per case; CSV columns are the union across cases,
+        # which DictWriter cannot do from the first row alone, so it is handled in
+        # _write instead of here
+        return {**{k: v for k, v in rec.items() if k != "qc_flags"},
+                "qc_flags": ";".join(rec.get("qc_flags", []))}
     if cmd in ("pi", "ll", "cobb"):
         return {
             "case_id": rec.get("case_id"),
@@ -117,8 +161,17 @@ def _write(records: List[dict], out: str, cmd: str) -> None:
                 fh.write(json.dumps(r, default=_json_default) + "\n")
     elif out.endswith(".csv"):
         rows = [_flatten(r, cmd) for r in records]
+        # THE COLUMN SET IS THE UNION, NOT THE FIRST ROW'S. Cases differ in which levels
+        # they contain -- a field-limited scan has no T12 -- so keying the header off
+        # rows[0] silently drops every column that case happened to lack.
+        cols, seen = [], set()
+        for r in rows:
+            for k in r:
+                if k not in seen:
+                    seen.add(k)
+                    cols.append(k)
         with open(out, "w", newline="", encoding="utf-8") as fh:
-            w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+            w = csv.DictWriter(fh, fieldnames=cols, restval="")
             w.writeheader()
             w.writerows(rows)
     else:

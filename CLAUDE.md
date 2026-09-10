@@ -10,7 +10,8 @@ etc.) from CTSpinoPelvic1K v3 CT segmentation masks. Two things coexist here:
 
 - **`ostk/`** — a real, tested Python package of shared geometry primitives and
   fully-implemented measurements (PI/SS/PT, lumbar lordosis, PI-LL mismatch +
-  SRS-Schwab modifiers, coronal Cobb angle). This is where Claude will do most
+  SRS-Schwab modifiers, coronal Cobb angle, and per-level
+  morphometry in each vertebra's own frame). This is where Claude will do most
   substantive work.
 - **`projects/<name>/`** — one folder per student miniproject (some are just a
   README spec waiting to be implemented; a few have a `main.py`). Each project
@@ -38,6 +39,7 @@ python -m ostk pi   --labels labels/ --out pi.csv       # pelvic incidence
 python -m ostk ll   --labels labels/ --out ll.jsonl      # lumbar lordosis
 python -m ostk cobb --labels labels/ --out cobb.csv      # coronal Cobb angle
 python -m ostk all  --labels labels/ --out summary.csv --workers 8   # full spinopelvic summary
+python -m ostk morph --labels labels/ --out morph.csv --workers 8  # per-level dimensions
 
 # with no --out, one-line-per-case JSON is printed to stdout instead
 ```

@@ -149,3 +149,24 @@ def test_pedicle_uses_the_long_axis_not_the_axis_matrix():
     long_axis = np.asarray(axes)[:, 0]
     assert long_axis.shape == (3,)
     assert abs(long_axis @ np.array([1.0, 0.0, 0.0])) > 0.9
+
+
+def test_cli_csv_columns_are_the_union_not_the_first_row(tmp_path):
+    """Cases differ in which levels they contain, so the header cannot come from row 0.
+
+    A field-limited abdominal scan has no T12. Keying DictWriter off the first record
+    drops every column that case happened to lack, silently and for every later case.
+    """
+    import csv as _csv
+    from ostk.cli import _write
+    records = [
+        {"case_id": "a", "L3_VBHp": 24.0, "qc_flags": ["ok"]},
+        {"case_id": "b", "L3_VBHp": 25.0, "T12_VBHp": 22.0, "qc_flags": ["ok"]},
+    ]
+    out = tmp_path / "m.csv"
+    _write(records, str(out), "morph")
+    rows = list(_csv.DictReader(out.open(encoding="utf-8")))
+    assert "T12_VBHp" in rows[0], "a column only the second case has must survive"
+    assert rows[0]["T12_VBHp"] == ""
+    assert rows[1]["T12_VBHp"] == "22.0"
+    assert rows[0]["qc_flags"] == "ok"
