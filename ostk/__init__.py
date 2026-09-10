@@ -1,6 +1,7 @@
 """OpenSpineToolkit kit (ostk) — reusable, tested primitives for building
 spinopelvic measurements from CTSpinoPelvic1K masks. See SPEC.md."""
-from . import drr, geometry, io, labels, masks, metrics, parallel, project2d, record, spine
+from . import (drr, geometry, io, labels, masks, metrics, morphometry, parallel,
+               project2d, record, spine, vertebral_body)
 from .drr import sagittal_drr_from_label
 from .geometry import (WORLD_SUPERIOR, angle_between, cobb_angle, fit_plane_tls,
                        fit_sphere, principal_axes, project_out,
@@ -9,6 +10,8 @@ from .io import load_ct, load_label, voxel_volume_mm3, voxels_to_world
 from .labels import LABELS, lid
 from .masks import (binary_mask, endplate_points, largest_component,
                     mask_world, surface_slab, world_centroid)
+from .morphometry import (body_heights, canal_dimensions, endplate_dimensions,
+                          level_morphometry, pedicle_widths, vertebra_frame)
 from .metrics import (ll_increase_needed, lumbar_lordosis,
                       lumbar_lordosis_from_label, pelvic_incidence,
                       pelvic_incidence_from_label, pi_ll_mismatch,
@@ -21,8 +24,10 @@ from .record import Measurement
 from .spine import endplate_from_label, endplate_surface, fit_endplate
 
 __all__ = [
-    "drr", "geometry", "io", "labels", "masks", "metrics", "parallel", "project2d",
-    "record", "spine",
+    "drr", "geometry", "io", "labels", "masks", "metrics", "morphometry", "parallel",
+    "project2d", "record", "spine", "vertebral_body",
+    "level_morphometry", "vertebra_frame", "body_heights", "endplate_dimensions",
+    "canal_dimensions", "pedicle_widths",
     "fit_endplate", "endplate_surface", "endplate_from_label",
     "WORLD_SUPERIOR", "angle_between", "cobb_angle", "fit_plane_tls",
     "fit_sphere", "principal_axes", "project_out", "project_to_plane_2d",
