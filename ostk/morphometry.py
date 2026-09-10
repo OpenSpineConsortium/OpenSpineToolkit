@@ -216,19 +216,27 @@ def pedicle_widths(mask, body, affine, frame=None, *, sup_axis=WORLD_SUPERIOR,
     Li et al. (Spine 2004;29:2438) and Sugisaki et al. (Spine 2009;34:2599). Outer
     cortical, to match Panjabi and Zindrick.
     """
-    # KNOWN BROKEN THROUGH level_morphometry, 2026-09-10. Run over all 802 released
-    # records and seven levels -- about 5,600 level-instances -- `ostk morph` produced a
-    # pedicle width for TWO of them. Every other call returns the empty dict below, so the
-    # columns arrive silently absent rather than wrong, which is the worse of the two.
+    # SLOW, AND ABSENT FROM THE 2026-09-10 SHARD RUN -- but not broken. Read this before
+    # concluding either way, because I concluded wrongly once already.
     #
-    # The ALGORITHM is not what is wrong: standalone it measured 114-118 pedicles per
-    # level (L1 7.1, L3 9.1, L5 14.4 mm, all inside the published ranges, and nearer the
-    # published L5 than the release's own extraction code). Something about how
-    # level_morphometry supplies `body`/`frame`, or about the resample on these volumes,
-    # makes one of the guards below fire almost every time. Not yet diagnosed.
+    # WHAT IS VERIFIED. Called directly, this works on released volumes: case 0010 returns
+    # L1 6.62 mm and L5 15.10 mm, and `level_morphometry` returns the same through its own
+    # call path. The L5 figure is nearer the published mean of 16.20 than the release's own
+    # extraction code manages (20.70), so the method is the better of the two where it runs.
     #
-    # Until it is, do not describe ostk as measuring pedicle width, and do not substitute
-    # it for the extraction script in any figure.
+    # WHAT IS ALSO TRUE. It is EXPENSIVE: the signed-distance resample to 0.35 mm costs
+    # roughly 30-60 s per level, so `ostk morph` over two cases exceeded a 280 s timeout.
+    # And the 2026-09-10 shard run over all 802 records produced pedicle columns for two
+    # level-instances out of ~5,600 -- while completing in 52-90 minutes per shard, which
+    # is far less time than 100 cases x 7 levels of this code would take. The columns were
+    # not computed and dropped; they were never computed.
+    #
+    # WHAT IS NOT ESTABLISHED is why. The likeliest reading is that those shards ran an
+    # earlier state of this package than the one that now measures correctly. It is NOT
+    # the `frame` argument, which this function never reads.
+    #
+    # So: do not describe ostk as measuring pedicle width in a pipeline until a full run
+    # is shown to populate the columns, and budget hours rather than minutes for it.
     vert = np.asarray(mask, bool)
     canal = canal_mask(vert, affine, sup_axis=sup_axis)
     sp = np.abs(np.asarray(affine, float)[:3, :3]).sum(axis=0)
