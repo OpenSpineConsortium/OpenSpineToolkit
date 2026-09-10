@@ -30,7 +30,7 @@ import numpy as np
 from scipy import ndimage
 
 from .geometry import WORLD_SUPERIOR, fit_sphere, project_to_plane_2d, unit
-from .labels import lid
+from .labels import labels_for
 from .masks import binary_mask, endplate_points, largest_component, mask_world, surface_slab
 from .metrics import LL_ENDPLATE_CHAIN
 from .project2d import sagittal_axes
@@ -52,11 +52,12 @@ def _pi_axis_and_origin(label, affine, sup_axis=WORLD_SUPERIOR,
     (same primitives/fractions/QC gate) -- returns the raw femoral-head
     centers, bicox origin, and lr axis this module projects along. None if a
     landmark is unavailable (never silently renders a wrong axis)."""
-    s1 = binary_mask(label, lid("S1"))
-    src = s1 if s1.any() else binary_mask(label, lid("sacrum"))
+    _L = labels_for(label)
+    s1 = binary_mask(label, _L["S1"])
+    src = s1 if s1.any() else binary_mask(label, _L["sacrum"])
     ep = endplate_points(largest_component(src), affine, sup_axis, "superior", endplate_frac)
-    fl = mask_world(largest_component(binary_mask(label, lid("femur_left"))), affine)
-    fr = mask_world(largest_component(binary_mask(label, lid("femur_right"))), affine)
+    fl = mask_world(largest_component(binary_mask(label, _L["femur_left"])), affine)
+    fr = mask_world(largest_component(binary_mask(label, _L["femur_right"])), affine)
     fhl = surface_slab(fl, sup_axis, "superior", head_frac)
     fhr = surface_slab(fr, sup_axis, "superior", head_frac)
     if min(len(ep), len(fhl), len(fhr)) < min_voxels:
@@ -75,14 +76,15 @@ def _framing_points(label, affine, sup_axis=WORLD_SUPERIOR,
     labeled silhouette, not just the fitted landmark points."""
     pts = []
 
-    s1 = binary_mask(label, lid("S1"))
-    src = s1 if s1.any() else binary_mask(label, lid("sacrum"))
+    _L = labels_for(label)
+    s1 = binary_mask(label, _L["S1"])
+    src = s1 if s1.any() else binary_mask(label, _L["sacrum"])
     w = mask_world(largest_component(src), affine)
     if len(w):
         pts.append(w)
 
     for fem in ("femur_left", "femur_right"):
-        fw = mask_world(largest_component(binary_mask(label, lid(fem))), affine)
+        fw = mask_world(largest_component(binary_mask(label, _L[fem])), affine)
         if not len(fw):
             continue
         head = surface_slab(fw, sup_axis, "superior", head_frac)
@@ -97,7 +99,7 @@ def _framing_points(label, affine, sup_axis=WORLD_SUPERIOR,
     for lv in LL_ENDPLATE_CHAIN:
         if lv == "S1":
             continue
-        m = binary_mask(label, lid(lv))
+        m = binary_mask(label, _L[lv])
         if m.any():
             pts.append(mask_world(largest_component(m), affine))
 

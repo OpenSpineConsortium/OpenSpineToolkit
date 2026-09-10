@@ -403,14 +403,20 @@ def endplate_overmask_midpoint(points, normal_axis=WORLD_SUPERIOR, which: str = 
 
 def endplate_overmask_midpoint_from_label(label, affine, level: str,
                                           normal_axis=WORLD_SUPERIOR,
-                                          which: str = "superior", lr=(1.0, 0.0, 0.0)):
+                                          which: str = "superior", lr=(1.0, 0.0, 0.0),
+                                          labels=None):
     """`endplate_overmask_midpoint` straight from a label volume + structure name
-    (S1 falls back to the sacrum label)."""
-    from .labels import lid
+    (S1 falls back to the sacrum label).
+
+    `labels` is the {name: id} map for THIS volume; detected from the volume when not
+    given, because ostk reads more than one scheme and resolving a name against the
+    wrong one returns a different bone rather than an error."""
+    from .labels import labels_for
     from .masks import binary_mask, largest_component, mask_world
-    m = binary_mask(label, lid(level))
+    L = labels_for(label) if labels is None else labels
+    m = binary_mask(label, L[level])
     if level == "S1" and not m.any():
-        m = binary_mask(label, lid("sacrum"))
+        m = binary_mask(label, L["sacrum"])
     pts = mask_world(largest_component(m), affine)
     return endplate_overmask_midpoint(pts, normal_axis, which, lr=lr,
                                       **corner_params_for_level(level))
@@ -418,15 +424,25 @@ def endplate_overmask_midpoint_from_label(label, affine, level: str,
 
 def endplate_from_label(label, affine, level: str, which: str = "superior",
                         normal_axis=WORLD_SUPERIOR, method: str = "corner",
-                        ap_band=(0.3, 0.9), lr=(1.0, 0.0, 0.0), min_points: int = 30):
+                        ap_band=(0.3, 0.9), lr=(1.0, 0.0, 0.0), min_points: int = 30,
+                        labels=None):
     """Convenience: fit an endplate straight from a label volume + structure name,
     with body-isolation params chosen for the level (tight for vertebrae, loose for
-    the sacrum). For S1 falls back to the sacrum label if the carved S1 is absent."""
-    from .labels import lid
+    the sacrum). For S1 falls back to the sacrum label if the carved S1 is absent.
+
+    THE FALLBACK IS A LAST RESORT, NOT AN EQUIVALENT. Fitting the plate to the whole
+    sacrum reads a surface flattened by the alae: measured over 802 released records
+    it puts the normal within a few degrees of vertical and drives pelvic incidence
+    far too low. It exists only so a volume without an S1 carve returns something;
+    callers that care should check whether S1 was present.
+
+    `labels` is the {name: id} map for THIS volume; detected when not given."""
+    from .labels import labels_for
     from .masks import binary_mask, largest_component, mask_world
-    m = binary_mask(label, lid(level))
+    L = labels_for(label) if labels is None else labels
+    m = binary_mask(label, L[level])
     if level == "S1" and not m.any():
-        m = binary_mask(label, lid("sacrum"))
+        m = binary_mask(label, L["sacrum"])
     pts = mask_world(largest_component(m), affine)
     return fit_endplate(pts, normal_axis, which, method=method, ap_band=ap_band,
                         lr=lr, min_points=min_points, **corner_params_for_level(level))
@@ -438,7 +454,7 @@ PI_ANCHOR_DEFAULT = "corner"
 
 
 def pi_anchor_point(label, affine, *, sup_axis=WORLD_SUPERIOR, mode=PI_ANCHOR_DEFAULT,
-                    level: str = "S1", which: str = "superior"):
+                    level: str = "S1", which: str = "superior", labels=None):
     """The point PI and PT are measured FROM on the S1 superior endplate.
 
     ONE definition, used by every caller. It previously lived in three places --
@@ -464,12 +480,14 @@ def pi_anchor_point(label, affine, *, sup_axis=WORLD_SUPERIOR, mode=PI_ANCHOR_DE
     Returns a world-mm point, or None if the endplate is unavailable.
     """
     from .masks import binary_mask, largest_component, mask_world
-    from .labels import LABELS
-    lid = LABELS.get(level)
+    from .labels import labels_for
+    L = labels_for(label) if labels is None else labels
+    lid = L.get(level)
     if lid is None:
         return None
     if mode == "overmask":
-        return endplate_overmask_midpoint_from_label(label, affine, level, sup_axis, which)
+        return endplate_overmask_midpoint_from_label(label, affine, level, sup_axis,
+                                                     which, labels=L)
     if mode != "corner":
         raise ValueError(f"pi anchor mode must be 'corner' or 'overmask', got {mode!r}")
     try:

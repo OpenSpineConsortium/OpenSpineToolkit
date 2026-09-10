@@ -74,7 +74,8 @@ def coronal_cobb_from_label(label, affine, *, case_id: str = "",
     and return the coronal Cobb angle as a Measurement (SPEC §4 contract).
     Never silently drops a bad case -- returns value=None with qc_flags set
     if no usable pair is found."""
-    from .labels import lid
+    from .labels import labels_for
+    _LMAP = labels_for(label)
     from .masks import binary_mask, largest_component, mask_world
 
     flags: List[str] = []
@@ -88,12 +89,12 @@ def coronal_cobb_from_label(label, affine, *, case_id: str = "",
     residuals: Dict[str, float] = {}
     for level in COBB_LEVEL_CHAIN:
         try:
-            vid = lid(level)
+            vid = _LMAP[level]
         except KeyError:
             continue
         m = binary_mask(label, vid)
         if level == "S1" and not m.any():
-            m = binary_mask(label, lid("sacrum"))
+            m = binary_mask(label, _LMAP["sacrum"])
         pts = mask_world(largest_component(m), affine)
         sup = fit_endplate(pts, sup_axis, "superior", ant_frac, min_points=min_voxels)
         inf = fit_endplate(pts, sup_axis, "inferior", ant_frac, min_points=min_voxels)

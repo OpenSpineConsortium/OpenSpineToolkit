@@ -330,9 +330,14 @@ def test_warp_ct_bone_follows_labels_and_cage():
     warped = surgery.warp_ct(ct, label, A, "L3", 12.0, technique="alif", postop_label=post)
 
     assert warped.shape == ct.shape and np.all(np.isfinite(warped))
-    moved = np.isin(post, [1, 2, 3])                            # rotated L1–L3 labels
+    # Ids come from the SAME map the phantom was built with. They used to be written
+    # here as 1, 2, 3 and 7, which silently encoded the legacy scheme: the moment the
+    # phantom's `lid` resolved against a different map the mask selected nothing and the
+    # assertion failed on an empty slice rather than on the behaviour under test.
+    from ostk.labels import lid
+    moved = np.isin(post, [lid(n) for n in ("L1", "L2", "L3")])  # rotated L1-L3 labels
     assert warped[moved].mean() > 150.0                         # bone HU followed the labels
-    s1 = label == 7
+    s1 = label == lid("S1")
     assert abs(warped[s1].mean() - ct[s1].mean()) < 40.0        # fixed S1 bone unmoved
     assert int((warped[post == surgery.CAGE_ID] == 250.0).sum()) > 0   # cage stamped
 

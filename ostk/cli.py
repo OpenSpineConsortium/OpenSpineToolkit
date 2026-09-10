@@ -49,9 +49,13 @@ def _label_files(labels_dir: str) -> List[str]:
 
 # --- top-level workers (picklable for ProcessPoolExecutor) ------------------
 
-# Levels the morphometry command reports. T12 and L6 are included because the borders are
-# what this toolkit is for; a level absent from a mask is simply skipped.
-_MORPH_LEVELS = {19: "T12", 20: "L1", 21: "L2", 22: "L3", 23: "L4", 24: "L5", 25: "L6"}
+# Levels the morphometry command reports, BY NAME. T11 and T12 are included because the
+# published thoracic reference series reach them, L6 because the borders are what this
+# toolkit is for; a level absent from a mask is simply skipped.
+#
+# Names, not ids: this list used to be written as integers, which silently assumed one of
+# the two label schemes. Resolving it per volume is the same fix applied throughout ostk.
+_MORPH_LEVEL_NAMES = ("T11", "T12", "L1", "L2", "L3", "L4", "L5", "L6")
 
 
 def _run_morph(path: str) -> dict:
@@ -63,12 +67,15 @@ def _run_morph(path: str) -> dict:
     import numpy as np
     from .io import load_label
     from .morphometry import level_morphometry
+    from .labels import labels_for
     lab, aff = load_label(path)
     rec = {"case_id": _case_id(path)}
     present = set(np.unique(lab).tolist())
+    LMAP = labels_for(lab)
     done, dropped = 0, 0
-    for vid, name in _MORPH_LEVELS.items():
-        if vid not in present:
+    for name in _MORPH_LEVEL_NAMES:
+        vid = LMAP.get(name)
+        if vid is None or vid not in present:
             continue
         try:
             r = level_morphometry(lab, aff, vid)

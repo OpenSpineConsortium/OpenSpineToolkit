@@ -143,12 +143,15 @@ def spinopelvic_summary_2d(endplates: Dict[str, Line], femoral: Optional[Pt] = N
 
 # ---- 2-D LABEL MASK -> endplate lines (so a 2-D seg routes like the 3-D one) -
 def endplates_from_mask_2d(mask, *, sup=(0, 1), endplate_frac: float = 0.30,
-                           head_frac: float = 0.35, min_pixels: int = 20):
+                           head_frac: float = 0.35, min_pixels: int = 20, labels=None):
     """Extract per-vertebra SUPERIOR endplate lines + the femoral-head point from a 2-D
     label mask (same ostk label ids as 3-D). The superior endplate = a line fit through
     the top `endplate_frac` slab of each body (the 2-D analogue of the 3-D slab + plane
     fit). Returns (endplates_dict, femoral_point_or_None)."""
-    from .labels import LABELS
+    from .labels import labels_for
+    # A 2-D mask carries the same ids as its 3-D volume, so the scheme is detected the
+    # same way -- from the ids present, never from a default.
+    LABELS = labels_for(mask) if labels is None else labels
     sup = unit(sup)
     m = np.asarray(mask)
     endplates: Dict[str, Line] = {}

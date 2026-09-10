@@ -54,15 +54,16 @@ def femoral_head_center(label, affine, femur_name, hip_name=None, *,
          the endplate fit uses for osteophytes.
     Falls back to a robust cranial-slab fit when the hip mask is absent/too small.
     Returns (centre, radius, rms) or None."""
-    from .labels import LABELS as _OSTK_LABELS
+    from .labels import labels_for
     from .masks import binary_mask, largest_component, mask_world, surface_slab
-    # `labels` lets a caller supply the name->id map that matches ITS volume. ostk's map
-    # is not the only one in use: CTSpinoPelvic1K v4 is VerSe-native (L1=20, femurs=32/33)
-    # while ostk's is the legacy scheme (L1=1, femurs=11/12). Resolving `femur_left`
+    # `labels` is the name->id map that matches THIS volume. More than one scheme is in
+    # use: the released CTSpinoPelvic1K (v10) is VerSe-native (L1=20, femurs=32/33) while
+    # the legacy scheme puts L1 at 1 and the femurs at 11/12. Resolving `femur_left`
     # against the wrong map does not error -- it silently fits a sphere to a THORACIC
-    # VERTEBRA, which is how a v4 case came back with PT -15.8 deg and the PI identity
-    # out by 31.5 deg while SS and LL looked fine.
-    LABELS = dict(labels) if labels is not None else _OSTK_LABELS
+    # VERTEBRA, which is how a case came back with PT -15.8 deg and the PI identity out
+    # by 31.5 deg while SS and LL looked fine. So when the caller does not say, the map
+    # is DETECTED from the volume; it is never assumed.
+    LABELS = dict(labels) if labels is not None else labels_for(label)
     def lid(n):
         return LABELS[n]
     if femur_name not in LABELS:
@@ -165,8 +166,53 @@ def _pi_from_plane(m, n, ep_rms, cL, cR, sup_axis=WORLD_SUPERIOR,
 from .spine import PI_ANCHOR_DEFAULT           # single source of truth
 
 
+# ── plausibility guards, and where the numbers come from ─────────────────────────────
+# These do not correct anything. They say, per case, that a returned geometry is not one a
+# human pelvis has, so a reader gets a flagged None instead of a number that will later be
+# averaged into a cohort statistic. That distinction is the whole point: an unflagged 1.1
+# deg pelvic incidence is far more expensive than a missing one.
+#
+# The bands are deliberately wide -- roughly the published mean +/- 4-5 SD -- because they
+# are failure detectors, not normal ranges, and an unusual patient must survive them.
+#
+#   PI   47.1 +/- 10.0 deg   Vrtovec 2012, Spine 37(8):E479, n=370, 3-D CT, automated
+#        44.97 +/- 8.52      Chen 2019, J Orthop Surg Res 14:13, n=320, 3-D CT model
+#        52.05               Veilleux 2020, JBJS Am 102(24):e130, n=200, automated CT
+#   SS   36.49               Veilleux 2020;  41 +/- 8.4  Vialle 2005, JBJS Am 87(2):260
+#   PT   15.60               Veilleux 2020;  13 +/- 6    Vialle 2005
+#
+# Note the modality offset: standing-radiograph cohorts sit near PI 55-57 while 3-D CT
+# cohorts sit near 45-52 (Lee & Liu, Eur Spine J 2022;31:241, report XR 56 vs CT 53 in the
+# same subjects). This release is supine CT, so the CT figures are the right anchor.
+PI_PLAUSIBLE = (10.0, 95.0)
+SS_PLAUSIBLE = (0.0, 80.0)
+PT_PLAUSIBLE = (-15.0, 55.0)
+# Inter-femoral-head-centre distance: 160 +/- 8 mm over 200 adults (Mullaji 2010, Skeletal
+# Radiol 39(4):363) -- the tightest pelvic landmark pair there is, which is why it makes a
+# good check. It matters more than it looks: the bicoxofemoral axis IS the sagittal-plane
+# normal here, so one truncated or replaced hip corrupts the endplate geometry too.
+IFD_PLAUSIBLE_MM = (125.0, 200.0)
+
+
+def _plausibility_flags(r, cL=None, cR=None):
+    """Name what is anatomically impossible about a result, if anything."""
+    out = []
+    for key, (lo, hi), name in ((("PI"), PI_PLAUSIBLE, "pelvic_incidence"),
+                                (("SS"), SS_PLAUSIBLE, "sacral_slope"),
+                                (("PT"), PT_PLAUSIBLE, "pelvic_tilt")):
+        v = r.get(key)
+        if v is not None and not (lo <= v <= hi):
+            out.append(f"implausible:{name}={v:.1f}")
+    if cL is not None and cR is not None:
+        d = float(np.linalg.norm(np.asarray(cL) - np.asarray(cR)))
+        if not (IFD_PLAUSIBLE_MM[0] <= d <= IFD_PLAUSIBLE_MM[1]):
+            out.append(f"implausible:femoral_head_separation={d:.0f}mm")
+    return out
+
+
+
 def _pi_from_label_core(label, affine, sup_axis, endplate_frac, head_frac,
-                        min_voxels, pi_anchor: str = PI_ANCHOR_DEFAULT):
+                        min_voxels, pi_anchor: str = PI_ANCHOR_DEFAULT, labels=None):
     """Extract the PI/SS/PT result dict from a v3 label volume (shared by the
     PI Measurement and the spinopelvic summary). The S1 superior endplate uses the
     shared `ostk.spine` endplate primitive (anterior band + true top-surface fit —
@@ -176,14 +222,24 @@ def _pi_from_label_core(label, affine, sup_axis, endplate_frac, head_frac,
     not a cranial slab. `endplate_frac` is kept for signature compatibility but no
     longer used. Returns (result_dict_or_None, flags)."""
     from .spine import endplate_from_label
+    from .labels import labels_for
+
+    # ONE detection per case, threaded into every primitive below. Detecting inside each
+    # primitive would re-scan the volume several times; letting each primitive fall back
+    # to a default map is what produced pelvic incidence for an entire release against
+    # the wrong scheme, measuring a thoracic vertebra as a femoral head.
+    LMAP = labels_for(label) if labels is None else labels
 
     flags: list = []
     ep_plane = endplate_from_label(label, affine, "S1", "superior",
-                                   normal_axis=sup_axis, min_points=min_voxels)
+                                   normal_axis=sup_axis, min_points=min_voxels,
+                                   labels=LMAP)
     L = femoral_head_center(label, affine, "femur_left", "left_hip",
-                            sup_axis=sup_axis, slab_frac=head_frac, min_voxels=min_voxels)
+                            sup_axis=sup_axis, slab_frac=head_frac,
+                            min_voxels=min_voxels, labels=LMAP)
     R = femoral_head_center(label, affine, "femur_right", "right_hip",
-                            sup_axis=sup_axis, slab_frac=head_frac, min_voxels=min_voxels)
+                            sup_axis=sup_axis, slab_frac=head_frac,
+                            min_voxels=min_voxels, labels=LMAP)
 
     if ep_plane is None:
         flags.append("low_voxels:S1")
@@ -199,7 +255,7 @@ def _pi_from_label_core(label, affine, sup_axis, endplate_frac, head_frac,
     # PI/PT radius origin -- ONE definition, shared with surgery via spine.pi_anchor_point.
     # Orientation (n) is unchanged either way, so SS/LL never move.
     from .spine import pi_anchor_point
-    _a = pi_anchor_point(label, affine, sup_axis=sup_axis, mode=pi_anchor)
+    _a = pi_anchor_point(label, affine, sup_axis=sup_axis, mode=pi_anchor, labels=LMAP)
     if _a is not None:
         m = _a
     else:
@@ -207,6 +263,7 @@ def _pi_from_label_core(label, affine, sup_axis, endplate_frac, head_frac,
     r = _pi_from_plane(m, n, ep_rms, cL, cR, sup_axis, rL=rL, rR=rR, eL=eL, eR=eR)
     if abs(r["SS"] + r["PT"] - r["PI"]) > 1.0:         # geometric identity check
         flags.append("identity_violation")
+    flags += _plausibility_flags(r, cL, cR)
     return r, (flags or ["ok"])
 
 
@@ -214,12 +271,14 @@ def pelvic_incidence_from_label(label, affine, *, case_id: str = "",
                                 sup_axis=WORLD_SUPERIOR, endplate_frac: float = 0.15,
                                 head_frac: float = 0.35,
                                 min_voxels: int = 50,
-                                pi_anchor: str = PI_ANCHOR_DEFAULT) -> Measurement:
+                                pi_anchor: str = PI_ANCHOR_DEFAULT,
+                                labels=None) -> Measurement:
     """Compose PI from a v3 label volume. Returns a Measurement with QC flags
     (never silently drops a bad case). SS/PT are available via
     `spinopelvic_summary_from_label`."""
     r, flags = _pi_from_label_core(label, affine, sup_axis, endplate_frac,
-                                   head_frac, min_voxels, pi_anchor=pi_anchor)
+                                   head_frac, min_voxels, pi_anchor=pi_anchor,
+                                   labels=labels)
     if r is None:
         return Measurement(case_id=case_id, parameter="pelvic_incidence",
                            value=None, qc_flags=flags,
@@ -259,14 +318,17 @@ def lumbar_lordosis(endplate_normals: Dict[str, np.ndarray], lr_axis) -> Dict:
 
 
 def _endplate_normal_from_label(label, affine, level, which, sup_axis, frac,
-                                min_voxels):
+                                min_voxels, labels=None):
     """(unit normal oriented cranially, centroid, rms, n_points) for one vertebral
     endplate, or (None, …) if the level is absent / too small. Delegates to the
     `ostk.spine.fit_endplate` primitive (anterior-body + true-surface fit)."""
-    from .labels import lid
+    from .labels import labels_for
     from .masks import binary_mask, largest_component, mask_world
     from .spine import corner_params_for_level
-    allpts = mask_world(largest_component(binary_mask(label, lid(level))), affine)
+    LMAP = labels_for(label) if labels is None else labels
+    if level not in LMAP:
+        return None, None, None, 0
+    allpts = mask_world(largest_component(binary_mask(label, LMAP[level])), affine)
     if len(allpts) < min_voxels:
         return None, None, None, len(allpts)
     res = fit_endplate(allpts, sup_axis, which, min_points=min_voxels,
@@ -277,14 +339,16 @@ def _endplate_normal_from_label(label, affine, level, which, sup_axis, frac,
     return n, c, rms, len(allpts)
 
 
-def _lr_axis_from_label(label, affine, sup_axis, head_frac, min_voxels):
+def _lr_axis_from_label(label, affine, sup_axis, head_frac, min_voxels, labels=None):
     """Patient L–R (sagittal-plane normal) from the two femoral-head centres
     (bicoxofemoral vector, robust acetabular-interface fit). Returns (lr_unit, ok).
     Falls back to the image X axis with ok=False if a femur is missing."""
     L = femoral_head_center(label, affine, "femur_left", "left_hip",
-                            sup_axis=sup_axis, slab_frac=head_frac, min_voxels=min_voxels)
+                            sup_axis=sup_axis, slab_frac=head_frac,
+                            min_voxels=min_voxels, labels=labels)
     R = femoral_head_center(label, affine, "femur_right", "right_hip",
-                            sup_axis=sup_axis, slab_frac=head_frac, min_voxels=min_voxels)
+                            sup_axis=sup_axis, slab_frac=head_frac,
+                            min_voxels=min_voxels, labels=labels)
     if L is None or R is None:
         return unit(np.array([1.0, 0.0, 0.0])), False
     return unit(R[0] - L[0]), True                      # right − left
@@ -292,15 +356,18 @@ def _lr_axis_from_label(label, affine, sup_axis, head_frac, min_voxels):
 
 def lumbar_lordosis_from_label(label, affine, *, case_id: str = "",
                                sup_axis=WORLD_SUPERIOR, endplate_frac: float = 0.15,
-                               head_frac: float = 0.35, min_voxels: int = 30
-                               ) -> Measurement:
+                               head_frac: float = 0.35, min_voxels: int = 30,
+                               labels=None) -> Measurement:
     """Compose lumbar lordosis from a v3 label volume. Sagittal plane is derived
     from the femoral heads (data-derived L–R axis, robust to scan tilt; SPEC §3);
     each endplate normal is a TLS fit to that body's cranial slab. Needs at least
     L1 + S1; missing intermediate levels are skipped (and flagged) so a
     FOV-clipped scan still yields the L1–S1 Cobb where possible."""
+    from .labels import labels_for
+    LMAP = labels_for(label) if labels is None else labels
     flags: list = []
-    lr, ok = _lr_axis_from_label(label, affine, sup_axis, head_frac, min_voxels)
+    lr, ok = _lr_axis_from_label(label, affine, sup_axis, head_frac, min_voxels,
+                                 labels=LMAP)
     if not ok:
         flags.append("sagittal_ref_fallback")          # used image X, not femurs
 
@@ -309,7 +376,8 @@ def lumbar_lordosis_from_label(label, affine, *, case_id: str = "",
     landmarks: Dict[str, list] = {}
     for lv in LL_ENDPLATE_CHAIN:
         n, c, rms, k = _endplate_normal_from_label(
-            label, affine, lv, "superior", sup_axis, endplate_frac, min_voxels)
+            label, affine, lv, "superior", sup_axis, endplate_frac, min_voxels,
+            labels=LMAP)
         if n is None:
             flags.append(f"missing_label:{lv}")
             continue
@@ -532,7 +600,8 @@ def spinopelvic_summary_from_label(label, affine, *, case_id: str = "",
                                    endplate_frac: float = 0.15,
                                    head_frac: float = 0.35,
                                    min_voxels: int = 30,
-                                   pi_anchor: str = PI_ANCHOR_DEFAULT) -> Dict:
+                                   pi_anchor: str = PI_ANCHOR_DEFAULT,
+                                   labels=None) -> Dict:
     """One-call clinical summary of every Greenberg §73 spinopelvic parameter
     computable from a v3 (Vert + S1 + femur) label: PI / SS / PT (PI valid on
     supine CT; SS/PT supine surrogates), LL, PI−LL mismatch, and the SRS-Schwab
@@ -540,11 +609,15 @@ def spinopelvic_summary_from_label(label, affine, *, case_id: str = "",
     omitted — out of scope without C7/T1 (SPEC §5). Returns a JSON-serialisable
     dict; values are None where their inputs were unavailable (flagged, never
     silently dropped)."""
+    from .labels import labels_for
+    LMAP = labels_for(label) if labels is None else labels
     pi_r, pi_flags = _pi_from_label_core(label, affine, sup_axis, endplate_frac,
-                                         head_frac, min_voxels, pi_anchor=pi_anchor)
+                                         head_frac, min_voxels, pi_anchor=pi_anchor,
+                                         labels=LMAP)
     ll_m = lumbar_lordosis_from_label(
         label, affine, case_id=case_id, sup_axis=sup_axis,
-        endplate_frac=endplate_frac, head_frac=head_frac, min_voxels=min_voxels)
+        endplate_frac=endplate_frac, head_frac=head_frac, min_voxels=min_voxels,
+        labels=LMAP)
 
     PI = round(pi_r["PI"], 3) if pi_r else None
     SS = round(pi_r["SS"], 3) if pi_r else None

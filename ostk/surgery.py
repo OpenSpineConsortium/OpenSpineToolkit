@@ -24,7 +24,7 @@ import numpy as np
 
 from .geometry import (WORLD_SUPERIOR, rotation_matrix, unit, cobb_angle,
                        project_out, angle_between)
-from .labels import LABELS
+from .labels import LABELS, labels_for as _labels_for
 
 # Cranial → caudal vertebral chain. The "mobile" segment for a correction at `level`
 # is `level` and everything ABOVE it; S1/sacrum/femurs are never mobile (pelvic anchor).
@@ -47,15 +47,16 @@ TECHNIQUES = {
 }
 
 
-def mobile_ids_for_level(level: str, present_ids) -> List[int]:
+def mobile_ids_for_level(level: str, present_ids, labels=None) -> List[int]:
     """Label ids of the vertebrae at or cranial to `level` (the segment a correction
     at `level` swings). `level` is the lowest MOBILE vertebra — e.g. an L5–S1 ALIF is
     level='L5' (L5 and up move, S1 stays). S1/sacrum are never included."""
     if level not in SPINE_CRANIOCAUDAL:
         raise ValueError(f"level {level!r} must be one of {SPINE_CRANIOCAUDAL}")
     names = SPINE_CRANIOCAUDAL[: SPINE_CRANIOCAUDAL.index(level) + 1]
+    L = LABELS if labels is None else labels
     pres = set(int(v) for v in present_ids)
-    return [LABELS[n] for n in names if LABELS[n] in pres]
+    return [L[n] for n in names if L[n] in pres]
 
 
 def _vertebra_below(level: str) -> Optional[str]:
@@ -64,6 +65,7 @@ def _vertebra_below(level: str) -> Optional[str]:
 
 
 def _lr_axis(label, affine, sup_axis) -> np.ndarray:
+    LABELS = _labels_for(label)   # scheme detected from THIS volume, not assumed
     try:
         from .metrics import femoral_head_center
         L = femoral_head_center(label, affine, "femur_left", "left_hip", sup_axis=sup_axis)
@@ -79,6 +81,7 @@ def _hinge_fulcrum(label, affine, level, position, sup_axis, lr) -> Optional[np.
     """Fulcrum at the operative disc/level: the anterior or posterior corner (or mid)
     of `level`'s INFERIOR endplate. Returns None if the corners can't be found (the
     caller falls back to the level centroid; the angle is unchanged either way)."""
+    LABELS = _labels_for(label)   # scheme detected from THIS volume, not assumed
     try:
         from .spine import endplate_corners, corner_params_for_level
         from .masks import binary_mask, largest_component, mask_world
@@ -100,9 +103,10 @@ def _oriented_theta(label, affine, level, delta_deg, lr, sup_axis) -> float:
     segment) — applying the SAME vector rotation the voxels get. Maximising the L1–S1
     Cobb (which stays <90° for any lumbar spine, so the acute value is monotonic) is
     exactly 'increase lordosis'. Falls back to +|Δ| if an endplate is unavailable."""
+    LABELS = _labels_for(label)   # scheme detected from THIS volume, not assumed
     th = float(np.deg2rad(abs(delta_deg)))
     present = set(int(v) for v in np.unique(label)) - {0}
-    mobile = set(mobile_ids_for_level(level, present))
+    mobile = set(mobile_ids_for_level(level, present, labels=LABELS))
     ref = "L1" if LABELS["L1"] in mobile else level   # top of the mobile segment
     try:
         from .spine import endplate_from_label
@@ -186,6 +190,7 @@ def compensate_pelvis(label, affine, *, target_pt: float = 20.0,
     (exact); this voxel rotation is lossy at coarse resolution and is meant for
     rendering the standing posture on real-resolution CT. No-op if PT ≤ target or the
     pelvis/femurs are unavailable."""
+    LABELS = _labels_for(label)   # scheme detected from THIS volume, not assumed
     from .metrics import spinopelvic_summary_from_label, femoral_head_center
     from .spine import pi_anchor_point
     label = np.asarray(label)
@@ -231,10 +236,11 @@ def correction_transform(label, affine, level: str, delta_deg: float, *,
     """Resolve the correction into its geometric pieces (shared by the label and CT
     paths): the mobile vertebra ids, the hinge fulcrum F (world), the L–R rotation
     axis, the signed angle θ, and the technique's (fulcrum position, reconcile mode)."""
+    LABELS = _labels_for(label)   # scheme detected from THIS volume, not assumed
     label = np.asarray(label)
     A = np.asarray(affine, dtype=float)
     present = set(int(v) for v in np.unique(label)) - {0}
-    mobile = mobile_ids_for_level(level, present)
+    mobile = mobile_ids_for_level(level, present, labels=LABELS)
     if not mobile:
         raise ValueError(f"no mobile vertebrae present at/above {level}")
     lvl_mask = label == LABELS[level]
@@ -317,6 +323,7 @@ def bend_spine(volume, affine, total_delta_deg, *, label_for_axes=None,
     `out_affine`/`out_shape`: warp a FULL-RES `volume` directly onto a different (e.g.
     downsampled demo) output grid in one resample — memory-light (the grid is the small
     output), so the post-op is generated from full-res but ships at demo resolution."""
+    LABELS = _labels_for(volume if label_for_axes is None else label_for_axes)   # scheme detected from THIS volume, not assumed
     from scipy import ndimage
     vol = np.asarray(volume)
     out_aff = np.asarray(out_affine, float) if out_affine is not None else None
@@ -440,6 +447,7 @@ def place_interbody_cages(label, ct, affine, disc_pairs, *, cage_id=CAGE_ID,
     L5–S1 cage below the disc, since "S1" spans the whole sacrum) and TILTED to the local
     endplate. Stamped at metal HU so it reads as an implant on CT (`cage_id=None` → CT-only,
     no colour label). Returns (label, ct) copies. `disc_pairs` = [(upper, lower), …]."""
+    LABELS = _labels_for(label)   # scheme detected from THIS volume, not assumed
     lab = np.asarray(label).copy()
     im = np.asarray(ct).copy()
     A = np.asarray(affine, float)
@@ -519,6 +527,7 @@ def bend_params(label, affine, *, delta_ll, delta_tk=0.0, pelvic_antevert=0.0,
     `top_op` = the TOP operated vertebra: lordosis ramps 0→ΔLL over S1→top_op (the fused
     segment), then rides flat (carried) up to L1, so a 2-level ALIF L4–S1 concentrates the
     correction at L4–S1 instead of spreading it across every lumbar level."""
+    LABELS = _labels_for(label)   # scheme detected from THIS volume, not assumed
     lab = np.asarray(label)
     A = np.asarray(affine, float)
     lr = unit(lr_axis) if lr_axis is not None else _lr_axis(lab, affine, sup_axis)
@@ -654,6 +663,7 @@ def simulate_correction(label, affine, level: str, delta_deg: float, *,
     with the hinge reconciled per technique (interbody/ACR → cage; PSO → body-wedge
     resect; SPO → mid-disc). Re-run ostk.metrics on the result for the post-op angles.
     """
+    LABELS = _labels_for(label)   # scheme detected from THIS volume, not assumed
     label = np.asarray(label)
     present = set(int(v) for v in np.unique(label)) - {0}
     t = correction_transform(label, affine, level, delta_deg, technique=technique,
