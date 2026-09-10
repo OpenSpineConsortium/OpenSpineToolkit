@@ -43,3 +43,15 @@ on supine CT): SVA, TPA. PI is the flagship (valid on supine CT); its absolute
 convention + LL are to be confirmed against manual measurement (Paper 2, Aim 2/3).
 Geometry cores and the PI=SS+PT / Cobb identities are unit-tested on analytic
 phantoms; `_from_label` extraction is the approximate glue pending that validation.
+
+## Known inefficiency: the femoral heads are fitted twice
+
+`spinopelvic_summary_from_label` fits each femoral head sphere **twice** per case — once
+in `_pi_from_label_core` for the hip axis, and again in `_lr_axis_from_label`, which
+derives the sagittal plane from the same two centres. Four sphere fits where two would do,
+and the sphere fit is the most expensive primitive in the call.
+
+Nothing is wrong with the answer; both fits are identical by construction. Hoisting the two
+centres into the summary and passing them into both paths would roughly halve the runtime
+of `ostk all`. Left alone for now because it is a pure optimisation and the released
+numbers were computed with it as it stands.
