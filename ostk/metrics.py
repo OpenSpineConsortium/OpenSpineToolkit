@@ -624,11 +624,13 @@ def spinopelvic_summary_from_label(label, affine, *, case_id: str = "",
     PT = round(pi_r["PT"], 3) if pi_r else None
     LL = ll_m.value
 
-    flags = []
-    if pi_r is None:
-        flags += [f"PI:{f}" for f in pi_flags]
-    if LL is None:
-        flags += [f"LL:{f}" for f in ll_m.qc_flags]
+    # FLAGS PROPAGATE WHETHER OR NOT A VALUE CAME BACK. They used to be attached only
+    # when the result was None, which silenced exactly the cases that most need saying:
+    # a geometry that violates PI = SS + PT, or returns a pelvic incidence no pelvis has,
+    # still produces a finite number, and that number was arriving here unflagged and
+    # indistinguishable from a good one.
+    flags = [f"PI:{f}" for f in pi_flags if f != "ok"]
+    flags += [f"LL:{f}" for f in ll_m.qc_flags if f != "ok"]
 
     out: Dict = {
         "case_id": case_id, "supine_ct": True,
