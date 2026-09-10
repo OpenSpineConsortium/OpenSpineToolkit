@@ -45,6 +45,7 @@ from __future__ import annotations
 from typing import Dict, Optional
 
 import numpy as np
+from scipy import ndimage
 
 from .geometry import WORLD_SUPERIOR, principal_axes, unit  # principal_axes -> (axes3x3, w, mean)
 from .masks import binary_mask, largest_component
@@ -159,145 +160,140 @@ def canal_dimensions(mask, affine, frame, *, sup_axis=WORLD_SUPERIOR,
     return {"SCW": _span(pts, frame["lat"]), "SCD": _span(pts, frame["ap"])}
 
 
-def pedicle_widths(mask, body, affine, frame, *, min_vox: int = 40,
-                   sup_axis=WORLD_SUPERIOR) -> Dict[str, float]:
-    """PDW and PDH for each side, at the isthmus, across the pedicle's OWN axis.
+def _fill(m):
+    """Fill each axial section. Erosion and distance transforms both eat from interior
+    holes, and the basivertebral channel is background in these masks."""
+    out = np.zeros_like(m)
+    for k in range(m.shape[2]):
+        if m[:, :, k].any():
+            out[:, :, k] = ndimage.binary_fill_holes(m[:, :, k])
+    return out
 
-    NOT VALIDATED -- opt in with `pedicle=True` and check it before believing it. Against
-    Panjabi 1992 this reads roughly half at L5 (about 10 mm against 18.6) while the four
-    other dimensions in this module land within about 1.5 mm at every level. Two earlier
-    versions failed in opposite directions, which is the signal that the isolation, not
-    the measurement, is what is wrong: the pedicle is a short oblique strut continuous
-    with the body at one end and the lamina at the other, and separating it from both by
-    a rule on the canal's extent is evidently not enough. The dimensions themselves are
-    taken correctly once a region is given; the region is the open problem.
 
-    THE PEDICLE HAS TO BE ISOLATED FIRST, and this is where a first version of this
-    function went wrong. Taking "everything that is not body" and splitting it at the
-    midline hands each side the lamina, the articular processes and the transverse
-    process as well, all of which are larger than the pedicle at the upper lumbar
-    levels. The principal axis then follows that bulk rather than the strut, and the
-    measured waist belongs to the wrong structure: it read 17.0 mm at L1 against a
-    published 8.6, and was near-correct at L5 only because an L5 pedicle is big enough
-    to dominate its own neighbourhood.
+def _resample_sdf(mask, sp, box, target):
+    """Resample a binary mask onto a fine isotropic grid with SUB-VOXEL edges.
 
-    So the pedicle is localised the way it is defined -- the bridge running lateral to
-    the canal, between the body behind it and the lamina behind that. Sections are
-    restricted to those where the arch actually encloses a canal, and within them to the
-    anterior part of the canal's anteroposterior span, which is where the pedicle
-    attaches. That region's own long axis is then measured from its points, and the
-    dimensions are taken in the plane across it: the ISTHMUS is a waist, so each is a low
-    percentile over the sections rather than an extent of the whole strut, which would be
-    measured where it flares into the body.
-
-    PDW is the dimension closer to the frame's lateral axis and PDH the one closer to
-    its superior axis, rather than the smaller and larger of the two: at a level where
-    the two are close, sorting by size silently swaps their names.
+    An 8 mm pedicle on a 0.8 mm grid is quantised at 10%, and a staircase edge measured
+    across an oblique strut reads systematically wide because the steps protrude
+    perpendicular to the direction being measured. Nearest-neighbour zoom only makes the
+    staircase finer; a signed distance field carries where the surface really lies between
+    voxel centres, so it is interpolated and re-thresholded instead.
     """
-    m = np.asarray(mask, bool)
-    b = np.asarray(body, bool) if body is not None else np.zeros_like(m)
-    canal = canal_mask(m, affine, sup_axis=sup_axis)
-    if canal is None or not canal.any():
-        return {}
-    arch = m & ~b
-    if arch.sum() < 2 * min_vox:
-        return {}
+    lo, hi = box
+    sub = np.asarray(mask, bool)[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
+    if not sub.any():
+        return None
+    sdf = (ndimage.distance_transform_edt(sub, sampling=sp)
+           - ndimage.distance_transform_edt(~sub, sampling=sp))
+    return ndimage.zoom(sdf, np.asarray(sp, float) / target, order=1, mode="nearest") > 0.0
 
-    ax = int(np.argmax(np.abs(np.asarray(affine, float)[:3, :3].T @ unit(sup_axis))))
-    # WHICH END OF THE CANAL IS ANTERIOR IS NOT AN ASSUMPTION. The pedicle attaches at the
-    # end of the canal that faces the body, and which array direction that is depends on
-    # the affine. Taking the wrong end measures the lamina instead: it read a flat 7 mm at
-    # every level, with none of the caudal widening a pedicle actually has.
-    bc = _world(b, affine).mean(axis=0) if b.any() else None
-    cc = _world(canal, affine).mean(axis=0)
-    apv = frame["ap"] if bc is None else unit(bc - cc)
-    # +1 if increasing array index along the in-plane A-P axis moves anteriorly
-    inplane = [i for i in range(3) if i != ax]
-    A = np.asarray(affine, float)[:3, :3]
-    ap_axis_idx = int(np.argmax([abs(A[:, i] @ apv) for i in inplane]))
-    ap_arr = inplane[ap_axis_idx]
-    ap_sign = 1 if (A[:, ap_arr] @ apv) > 0 else -1
-    # position of that array axis within the moved (sup-first) view
-    ap_moved = 0 if ap_arr < ax else 1        # after moveaxis(ax, 0), axes are [ax, rest...]
-    ap_moved = [i for i in range(3) if i != ax].index(ap_arr)
-    keep = np.zeros_like(arch)
-    moved_a, moved_c, moved_k = (np.moveaxis(x, ax, 0) for x in (arch, canal, keep))
-    for k in range(moved_a.shape[0]):
-        ca = moved_c[k]
-        if ca.sum() < 12:
-            continue
-        # in this 2-D section, axis `ap_moved` is anteroposterior and the other is lateral
-        lat_moved = 1 - ap_moved
-        ys = np.nonzero(ca.any(axis=lat_moved))[0]      # extent along A-P
-        xs = np.nonzero(ca.any(axis=ap_moved))[0]       # extent along lateral
-        if len(ys) < 3 or len(xs) < 3:
-            continue
-        span = ys.max() - ys.min()
-        if ap_sign > 0:                                  # anterior is the HIGH index end
-            lo_ap, hi_ap = ys.min() + int(0.45 * span), ys.max()
-        else:                                            # anterior is the LOW index end
-            lo_ap, hi_ap = ys.min(), ys.min() + int(0.55 * span)
-        band = np.zeros_like(ca)
-        lat = np.zeros_like(ca)
-        if ap_moved == 1:
-            band[:, lo_ap:hi_ap + 1] = True
-            lat[:xs.min(), :] = True
-            lat[xs.max() + 1:, :] = True
-        else:
-            band[lo_ap:hi_ap + 1, :] = True
-            lat[:, :xs.min()] = True
-            lat[:, xs.max() + 1:] = True
-        moved_k[k] = moved_a[k] & band & lat
-    keep = np.moveaxis(moved_k, 0, ax)
-    if keep.sum() < 2 * min_vox:
-        return {}
 
-    pts_all = _world(keep, affine)
-    if not len(pts_all):
+def pedicle_widths(mask, body, affine, frame=None, *, sup_axis=WORLD_SUPERIOR,
+                   lr=(1.0, 0.0, 0.0), margin: int = 6,
+                   target: float = 0.35) -> Dict[str, float]:
+    """PDW per side, by the published convention.
+
+    Written against the literature after four attempts failed. Two things it settles that
+    guessing did not:
+
+    THE REGION IS BOUNDED BEFORE ANYTHING IS MINIMISED. Kumar et al. (Int J Med Robot 2025,
+    doi:10.1002/rcs.70049) define an Initial Pedicle Region per axial slice, between the
+    vertebral-body boundary and the spinal-canal boundary, split left and right by the line
+    joining the canal centre to the body centre. The pars is posterior to the canal, so it
+    is never a candidate -- which is the whole of my min-cut failure, where the narrowest
+    route from body to lamina ran through the pars instead of the pedicle.
+
+    PDW IS THE TRANSVERSE EXTENT, NOT THE INSCRIBED CIRCLE. This is the error that made
+    every previous version read flat across levels. A maximum inscribed circle measures
+    min(width, height). At L1 the pedicle is 8.6 wide and about 16 tall, so the circle is
+    the width and the answer looks right; by L5 it is about 18.6 wide and the height is
+    limiting, so the same code returns the height and the caudal widening disappears.
+    Makino et al. (Eur Spine J 2012) show the flip directly: transverse 5.5 to 12.9 mm from
+    L1 to L5 while sagittal runs 11.9 down to 9.0. So the cross-section is measured along
+    the vertebra's own transverse direction.
+
+    Isthmus is the section of least area perpendicular to the pedicle's own axis, after
+    Li et al. (Spine 2004;29:2438) and Sugisaki et al. (Spine 2009;34:2599). Outer
+    cortical, to match Panjabi and Zindrick.
+    """
+    vert = np.asarray(mask, bool)
+    canal = canal_mask(vert, affine, sup_axis=sup_axis)
+    sp = np.abs(np.asarray(affine, float)[:3, :3]).sum(axis=0)
+    vfill = _fill(vert)
+    idx = np.argwhere(vfill)
+    if not len(idx) or canal is None:
         return {}
-    latv, supv = frame["lat"], frame["sup"]
-    mid = float(np.median(_world(m, affine) @ latv))
-    t = pts_all @ latv
-    out: Dict[str, float] = {}
-    for side, sel in (("r", t > mid), ("l", t < mid)):
-        pts = pts_all[sel]
-        if len(pts) < min_vox:
+    lo = np.maximum(idx.min(0) - margin, 0)
+    hi = np.minimum(idx.max(0) + margin + 1, np.array(vfill.shape))
+    V = _resample_sdf(vfill, sp, (lo, hi), target)
+    B = _resample_sdf(_fill(np.asarray(body, bool)), sp, (lo, hi), target)
+    C = _resample_sdf(canal, sp, (lo, hi), target)
+    if V is None or C is None or B is None or not C.any():
+        return {}
+    B = B & V
+
+    # ---- the Initial Pedicle Region, per axial section -------------------------------
+    ipr = {"l": np.zeros_like(V), "r": np.zeros_like(V)}
+    for k in range(V.shape[2]):
+        cs, vs, bs = C[:, :, k], V[:, :, k], B[:, :, k]
+        if cs.sum() < 20 or not bs.any():
             continue
-        try:
-            axes, _, _ = principal_axes(pts)
-        except Exception:
+        cx = np.nonzero(cs.any(axis=1))[0]
+        cy = np.nonzero(cs.any(axis=0))[0]
+        bx = np.nonzero(bs.any(axis=1))[0]
+        band = np.zeros_like(vs)
+        band[:, cy.min():cy.max() + 1] = True          # anterior to the canal's back wall
+        for name, lat in (("l", slice(int(bx.min()), int(cx.min()))),
+                          ("r", slice(int(cx.max()) + 1, int(bx.max()) + 1))):
+            if lat.start is None or lat.stop is None or lat.stop <= lat.start:
+                continue
+            reg = np.zeros_like(vs)
+            reg[lat] = vs[lat]
+            reg &= band & ~bs                          # bone, not body, lateral of canal
+            if reg.sum() < 15:
+                continue
+            lab, n = ndimage.label(reg)
+            if n:
+                sizes = ndimage.sum(reg, lab, range(1, n + 1))
+                ipr[name][:, :, k] = lab == (int(np.argmax(sizes)) + 1)
+
+    out = {}
+    lat_dir = np.array([1.0, 0.0, 0.0])                # array x is left-right after canon.
+    for name in ("l", "r"):
+        pts_i = np.argwhere(ipr[name])
+        if len(pts_i) < 200:
             continue
-        axis = unit(np.asarray(axes)[:, 0])
-        # the two directions across the strut
-        u = latv - (latv @ axis) * axis
+        pts = pts_i.astype(float) * target
+        axes, _, cen = principal_axes(pts)
+        axis = unit(np.asarray(axes)[:, 0])            # the pedicle's own long axis
+        t = pts @ axis
+        lo_t, hi_t = np.quantile(t, [0.15, 0.85])
+        best = None
+        for c in np.linspace(lo_t, hi_t, 25):
+            sec = pts[np.abs(t - c) <= target]
+            if len(sec) < 25:
+                continue
+            area = len(sec) * target ** 2               # section of least area = isthmus
+            if best is None or area < best[0]:
+                best = (area, c, sec)
+        if best is None:
+            continue
+        sec = best[2]
+        # transverse extent within that section, in the vertebra's own left-right
+        u = lat_dir - (lat_dir @ axis) * axis
         if np.linalg.norm(u) < 1e-6:
             continue
         u = unit(u)
-        v = unit(np.cross(axis, u))
-        # name them by which frame axis each is closer to, not by which is smaller
-        w_dir, h_dir = (u, v) if abs(u @ latv) >= abs(v @ latv) else (v, u)
-        sarr = pts @ axis
-        lo, hi = np.quantile(sarr, [0.15, 0.85])
-        ws, hs = [], []
-        for c in np.linspace(lo, hi, 9):
-            sec = pts[np.abs(sarr - c) <= 1.0]
-            if len(sec) < 8:
-                continue
-            ws.append(_span(sec, w_dir))
-            hs.append(_span(sec, h_dir))
-        if ws:
-            out[f"PDW_{side}"] = float(np.percentile(ws, 20))
-            out[f"PDH_{side}"] = float(np.percentile(hs, 20))
-    for k in ("PDW", "PDH"):
-        a, bb = out.get(f"{k}_l"), out.get(f"{k}_r")
-        if a is not None and bb is not None:
-            out[k] = 0.5 * (a + bb)
+        proj = sec @ u
+        out[name] = float(proj.max() - proj.min())
+    if "l" in out and "r" in out:
+        out["mean"] = 0.5 * (out["l"] + out["r"])
     return out
 
 
 def level_morphometry(label, affine, level_id: int, *, sup_axis=WORLD_SUPERIOR,
-                      lr=(1.0, 0.0, 0.0), max_plate_rms_mm: float = 2.0,
-                      pedicle: bool = False) -> Optional[Dict[str, float]]:
+                      lr=(1.0, 0.0, 0.0), max_plate_rms_mm: float = 2.0
+                      ) -> Optional[Dict[str, float]]:
     """Every dimension above for ONE vertebra, or None if its plates did not fit.
 
     The plate fit's own residual is the gate. A level whose end-plate did not converge
@@ -325,11 +321,6 @@ def level_morphometry(label, affine, level_id: int, *, sup_axis=WORLD_SUPERIOR,
         for k, v in endplate_dimensions(body, affine, corners, frame).items():
             out[f"{k}{tag}"] = v
     out.update(canal_dimensions(m, affine, frame, sup_axis=sup_axis, lr=lr))
-    # PEDICLE IS OFF BY DEFAULT AND THE REASON IS IN pedicle_widths' docstring: it is not
-    # validated. Every other dimension here lands within about 1.5 mm of the published
-    # cadaveric series across levels; this one does not, and shipping a number that cannot
-    # be checked next to four that can would borrow their credibility.
-    if pedicle:
-        out.update(pedicle_widths(m, body, affine, frame, sup_axis=sup_axis))
+    out.update(pedicle_widths(m, body, affine, frame, sup_axis=sup_axis, lr=lr))
     out["plate_rms_mm"] = max(float(sup[2]), float(inf[2]))
     return {k: (round(v, 2) if isinstance(v, float) else v) for k, v in out.items()}

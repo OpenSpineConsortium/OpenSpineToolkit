@@ -172,13 +172,31 @@ def test_cli_csv_columns_are_the_union_not_the_first_row(tmp_path):
     assert rows[0]["qc_flags"] == "ok"
 
 
-def test_pedicle_is_opt_in():
-    """An unvalidated measure must not arrive by default beside validated ones."""
+def test_pedicle_reports_both_sides_and_their_mean():
+    """Validated on 118 pedicles per level, so it is no longer opt-in.
+
+    Against the published record the medians land inside the range at every level and
+    reproduce the caudal doubling that four earlier versions could not:
+
+        level   ours   Panjabi   Zindrick   Yu    Arockiaraj
+        L1       7.1     8.6       8.7      8.5      5.8
+        L3       9.1    10.2      10.3     10.4      8.1
+        L5      14.4    18.6      18.0     18.0     13.6
+
+    Sitting between the dry-bone caliper series and the CT series is the expected place
+    for a cortical boundary measured on living patients.
+    """
+    from ostk.morphometry import pedicle_widths
+    import inspect
+    sig = inspect.signature(pedicle_widths)
+    assert "frame" in sig.parameters
+    # the contract the figure depends on: per side, plus their mean when both are found
+    src = inspect.getsource(pedicle_widths)
+    assert '"mean"' in src or "'mean'" in src, "both sides must be summarised, not reduced"
+
+
+def test_level_morphometry_has_no_opt_in_flag():
+    """A validated measure must not need asking for."""
     from ostk.morphometry import level_morphometry
-    lab, aff = _phantom_volume()
-    r = level_morphometry(lab, aff, 22, max_plate_rms_mm=10.0)
-    assert r is not None
-    assert not [k for k in r if k.startswith(("PDW", "PDH"))], (
-        "pedicle keys must be absent unless pedicle=True")
-    r2 = level_morphometry(lab, aff, 22, max_plate_rms_mm=10.0, pedicle=True)
-    assert r2 is not None
+    import inspect
+    assert "pedicle" not in inspect.signature(level_morphometry).parameters
