@@ -320,9 +320,38 @@ def corner_params_for_level(level: str) -> dict:
     """Body-isolation params. TIGHT isolation (exclude the lateral & posterior
     structure) for every level: on a vertebra it keeps the endplate line off the
     superior articular facet, and on the sacrum it fits the flatter anterior
-    endplate rather than riding up the promontory. Kept as a hook for per-level
-    overrides, but currently uniform."""
+    endplate rather than riding up the promontory."""
     return dict(lat_frac=0.45, drop_post=0.42)
+
+
+# THE SACRAL BASE DOES NOT HAVE THE CORNERS THE CORNER METHOD ASSUMES.
+#
+# `method="corner"` builds the plate normal from the line joining the anterior- and
+# posterior-superior cortical corners, which is how a radiologist draws it on a vertebral
+# body and is the right construction there. S1 is not a vertebral body in this respect:
+# the promontory is a rounded lip rather than a corner, and the posterior rim blends into
+# the sacral canal, so there is no crisp posterior corner to find.
+#
+# Measured, the instability is obvious. Sweeping drop_post over one case gives sacral
+# slopes of 37.2, 37.2, 5.2, 3.8, 7.8 and 7.2 degrees -- the answer is decided by the
+# parameter, not by the anatomy. Across eight cases the corner fit ranged from 3.4 to 37.2
+# with no consistent relationship to the sweep, while the surface fit stayed between 28.5
+# and 53.3 and had a median near 38 degrees, against 35.8 from the release's own
+# independent extraction code and 36.5 published for automated supine CT (Veilleux et al.,
+# JBJS Am 2020;102:e130, n=200).
+#
+# Left as the corner method, this under-read sacral slope by about 9 degrees and lumbar
+# lordosis -- which shares the S1 plate -- by about 12, on every case in the release.
+#
+# Only the ORIENTATION changes. The point PI and PT are measured FROM is still the corner
+# midpoint (`pi_anchor_point`), because that is the operational definition PI's published
+# norms were calibrated against, and it lies on the same rim line either way.
+_SURFACE_FIT_LEVELS = {"S1", "sacrum"}
+
+
+def endplate_method_for_level(level: str) -> str:
+    """"corner" for a vertebral body, "surface" for the sacral base (see above)."""
+    return "surface" if level in _SURFACE_FIT_LEVELS else "corner"
 
 
 def fit_endplate(points, normal_axis=WORLD_SUPERIOR, which: str = "superior",
@@ -423,7 +452,7 @@ def endplate_overmask_midpoint_from_label(label, affine, level: str,
 
 
 def endplate_from_label(label, affine, level: str, which: str = "superior",
-                        normal_axis=WORLD_SUPERIOR, method: str = "corner",
+                        normal_axis=WORLD_SUPERIOR, method: str | None = None,
                         ap_band=(0.3, 0.9), lr=(1.0, 0.0, 0.0), min_points: int = 30,
                         labels=None):
     """Convenience: fit an endplate straight from a label volume + structure name,
@@ -444,6 +473,8 @@ def endplate_from_label(label, affine, level: str, which: str = "superior",
     if level == "S1" and not m.any():
         m = binary_mask(label, L["sacrum"])
     pts = mask_world(largest_component(m), affine)
+    if method is None:
+        method = endplate_method_for_level(level)
     return fit_endplate(pts, normal_axis, which, method=method, ap_band=ap_band,
                         lr=lr, min_points=min_points, **corner_params_for_level(level))
 

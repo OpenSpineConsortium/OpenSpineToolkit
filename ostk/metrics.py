@@ -324,14 +324,18 @@ def _endplate_normal_from_label(label, affine, level, which, sup_axis, frac,
     `ostk.spine.fit_endplate` primitive (anterior-body + true-surface fit)."""
     from .labels import labels_for
     from .masks import binary_mask, largest_component, mask_world
-    from .spine import corner_params_for_level
+    from .spine import corner_params_for_level, endplate_method_for_level
     LMAP = labels_for(label) if labels is None else labels
     if level not in LMAP:
         return None, None, None, 0
     allpts = mask_world(largest_component(binary_mask(label, LMAP[level])), affine)
     if len(allpts) < min_voxels:
         return None, None, None, len(allpts)
+    # Level-aware, so lordosis and the sacral slope share one S1 plate. Fitting S1 here
+    # with the corner method while the PI path used the surface fit would have given the
+    # same vertebra two different orientations in one summary.
     res = fit_endplate(allpts, sup_axis, which, min_points=min_voxels,
+                       method=endplate_method_for_level(level),
                        **corner_params_for_level(level))
     if res is None:
         return None, None, None, len(allpts)
