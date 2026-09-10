@@ -216,6 +216,19 @@ def pedicle_widths(mask, body, affine, frame=None, *, sup_axis=WORLD_SUPERIOR,
     Li et al. (Spine 2004;29:2438) and Sugisaki et al. (Spine 2009;34:2599). Outer
     cortical, to match Panjabi and Zindrick.
     """
+    # KNOWN BROKEN THROUGH level_morphometry, 2026-09-10. Run over all 802 released
+    # records and seven levels -- about 5,600 level-instances -- `ostk morph` produced a
+    # pedicle width for TWO of them. Every other call returns the empty dict below, so the
+    # columns arrive silently absent rather than wrong, which is the worse of the two.
+    #
+    # The ALGORITHM is not what is wrong: standalone it measured 114-118 pedicles per
+    # level (L1 7.1, L3 9.1, L5 14.4 mm, all inside the published ranges, and nearer the
+    # published L5 than the release's own extraction code). Something about how
+    # level_morphometry supplies `body`/`frame`, or about the resample on these volumes,
+    # makes one of the guards below fire almost every time. Not yet diagnosed.
+    #
+    # Until it is, do not describe ostk as measuring pedicle width, and do not substitute
+    # it for the extraction script in any figure.
     vert = np.asarray(mask, bool)
     canal = canal_mask(vert, affine, sup_axis=sup_axis)
     sp = np.abs(np.asarray(affine, float)[:3, :3]).sum(axis=0)
