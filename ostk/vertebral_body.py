@@ -109,9 +109,25 @@ def canal_mask(mask, affine, *, sup_axis=WORLD_SUPERIOR, min_vox: int = 20
     filled = np.zeros_like(m)
     mv = np.moveaxis(m, ax, 0)
     fv = np.moveaxis(filled, ax, 0)
+    # CLOSE THE RING BEFORE LOOKING FOR THE HOLE. A lamina one voxel short of meeting
+    # leaves the canal open to the background, binary_fill_holes then finds nothing at
+    # all, and the section is lost -- which is why so many levels came back with no
+    # canal on thick or noisy scans. Banik, Rangayyan & Boag (J Digit Imaging 23:301)
+    # close the canal with a tubular element 2 mm in radius for exactly this; the same
+    # radius in-plane bridges the interlaminar gap.
+    #
+    # The closing is used ONLY TO FIND the hole. The hole is then taken against the
+    # ORIGINAL mask, so the canal is not shrunk by the bone the closing invented and
+    # every downstream use -- the body cut above all -- sees the same wall it always did.
+    sp = np.sqrt((np.asarray(affine, float)[:3, :3] ** 2).sum(axis=0))
+    in_plane = float(min(v for i, v in enumerate(sp) if i != ax))
+    rr = max(1, int(round(2.0 / in_plane)))
+    yy, xx = np.ogrid[-rr:rr + 1, -rr:rr + 1]
+    se = (xx ** 2 + yy ** 2) <= rr ** 2
+    mvc = np.moveaxis(m, ax, 0)
     for k in range(mv.shape[0]):
         if mv[k].any():
-            fv[k] = ndimage.binary_fill_holes(mv[k])
+            fv[k] = ndimage.binary_fill_holes(ndimage.binary_closing(mvc[k], se))
     canal = np.moveaxis(fv, 0, ax) & ~m
     if canal.sum() < min_vox:
         return None

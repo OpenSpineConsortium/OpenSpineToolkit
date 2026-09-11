@@ -144,12 +144,38 @@ def endplate_dimensions(body, affine, corners, frame, *,
     return out
 
 
+CANAL_MIDSAG_HALF_MM = 1.5     # half-width of the strip SCD is read on
+CANAL_SLAB_FRAC = 0.5          # central fraction of the closed-ring column used
+
+
 def canal_dimensions(mask, affine, frame, *, sup_axis=WORLD_SUPERIOR,
                      lr=(1.0, 0.0, 0.0)) -> Dict[str, float]:
     """SCW and SCD, in the vertebra's frame rather than the scanner's.
 
-    ostk's canal_mask carves the enclosed canal from the whole-vertebra mask; both
-    dimensions are then extents of that solid along the frame's own axes.
+    canal_mask carves the enclosed canal from the whole-vertebra mask. SCW is the
+    transverse extent of that solid, which is what the transverse diameter means.
+
+    SCD IS NOT THE SOLID'S EXTENT, and taking it as one was wrong. The published measure
+    is a MIDSAGITTAL diameter in every normative series -- Verbiest's criterion, Cizmic's
+    "mediosagittal diameter", Aly & Amin's "midsagittal diameter", Cook & Baker on the
+    midsagittal reformat, and Panjabi's SCD itself. The L4 and especially the L5 canal is
+    trefoil (Aly & Amin, Orthopedics 36:e229, n=300), so the widest anteroposterior chord
+    of the solid runs through a LATERAL RECESS and reads several millimetres high; the
+    error is shape-dependent, so it also inflates the variance at exactly the two levels
+    where the shape varies most.
+
+    And it is read over the PEDICLE SLAB rather than the whole column. Maeder et al.
+    (Diagnostics 13:734, n=1050) measure "at the vertebral pedicle levels ... to limit the
+    influence of degenerative changes, which typically occur at the intervertebral disc
+    and facet joint levels"; Cook & Baker (Int J Spine Surg 15:1072) at the
+    "pediculolaminar level". canal_mask already returns only the sections where the arch
+    closes the ring, so that column IS the pediculolaminar extent -- its central half is
+    the slab, and the median over the slab is the value.
+
+    Working in the vertebra's own frame is what makes the slab meaningful: Eubanks, Cann
+    & Brant-Zawadzki (Radiology 157:243) showed in phantom that sections cut oblique to
+    the canal "can make it appear artifactually stenotic" through volume averaging, which
+    is a scanner-axis failure this frame does not have.
     """
     canal = canal_mask(np.asarray(mask, bool), affine, sup_axis=sup_axis)
     if canal is None or not canal.any():
@@ -157,7 +183,46 @@ def canal_dimensions(mask, affine, frame, *, sup_axis=WORLD_SUPERIOR,
     pts = _world(largest_component(canal), affine)
     if len(pts) < 20:
         return {}
-    return {"SCW": _span(pts, frame["lat"]), "SCD": _span(pts, frame["ap"])}
+    sp = np.sqrt((np.asarray(affine, float)[:3, :3] ** 2).sum(axis=0))
+    dims = _canal_slab_dims(pts, frame, float(sp.max()))
+    return dims if dims else {"SCW": _span(pts, frame["lat"])}
+
+
+def _canal_slab_dims(pts: np.ndarray, frame, step: float) -> Dict[str, float]:
+    """SCW and SCD over the canal's central slab, one chord per section.
+
+    Sections are BINNED rather than grouped on equal coordinates. The frame is the
+    vertebra's own, so a point's height along frame["sup"] is a continuous number and no
+    two voxels share it exactly; grouping on ties gave one point per section, no chord
+    ever reached three points, and SCD came back empty on every level. Bins one voxel
+    deep recover the sections the frame dissolved.
+    """
+    lat = pts @ unit(frame["lat"])
+    ap = pts @ unit(frame["ap"])
+    sup = pts @ unit(frame["sup"])
+    lo, hi = np.percentile(sup, [50.0 * (1.0 - CANAL_SLAB_FRAC),
+                                 50.0 * (1.0 + CANAL_SLAB_FRAC)])
+    slab = (sup >= lo) & (sup <= hi)
+    if slab.sum() < 20:
+        return {}
+    step = max(step, 1e-3)
+    bins = np.round((sup - sup.min()) / step).astype(int)
+    mid = float(np.median(lat[slab]))
+    widths, depths = [], []
+    for b in np.unique(bins[slab]):
+        sel = slab & (bins == b)
+        if sel.sum() < 10:
+            continue
+        widths.append(float(lat[sel].max() - lat[sel].min()))
+        strip = sel & (np.abs(lat - mid) <= CANAL_MIDSAG_HALF_MM)
+        if strip.sum() >= 3:
+            depths.append(float(ap[strip].max() - ap[strip].min()))
+    out = {}
+    if widths:
+        out["SCW"] = float(np.median(widths))
+    if depths:
+        out["SCD"] = float(np.median(depths))
+    return out
 
 
 def _fill(m):
